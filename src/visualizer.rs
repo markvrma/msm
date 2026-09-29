@@ -1,6 +1,10 @@
-//! Audio visualizer for the FOR YOU pane: one ring of particles per frequency
-//! band, bass at the center and highs outward (a speaker cone, not a target),
-//! the last ring filling out to the pane edges. A particle climbs a glyph
+//! Audio visualizer: circles made of one ring of particles per frequency
+//! band, bass at the center and highs outward (a speaker cone, not a target).
+//! The FOR YOU pane gets one circle, the largest that fits, whose rings then
+//! repeat outward (bands cycling 0, 1, 2, ...) to the pane edges and corners. The full-screen one (`multi`) gets
+//! overlapping circles of random size and place that together cover the
+//! screen, all reading the same levels: a kick pulses the core of every one of
+//! them at once. A particle climbs a glyph
 //! ladder as its band gets louder -- it "jumps out" of the screen -- and sinks
 //! back down the hollow ladder as it decays.
 //!
@@ -131,10 +135,11 @@ pub struct Visualizer {
     last: Instant,
     rng: u32,
     live: bool,
+    multi: bool, // overlapping random circles instead of one
 }
 
 impl Visualizer {
-    pub fn new() -> Visualizer {
+    pub fn new(multi: bool) -> Visualizer {
         Visualizer {
             art: None,
             colors: FALLBACK.to_vec(),
@@ -146,6 +151,7 @@ impl Visualizer {
             last: Instant::now(),
             rng: 0x9e37_79b9,
             live: false,
+            multi,
         }
     }
 
@@ -163,6 +169,7 @@ impl Visualizer {
             return;
         }
         self.art = path.map(Path::to_path_buf);
+        self.dims = (0, 0); // new cover, new song: deal a fresh arrangement
         let pal = path
             .and_then(|p| crate::art::art_grid(p, cols, rows).ok())
             .map_or(Vec::new(), |g| palette(&g));
@@ -203,11 +210,8 @@ impl Visualizer {
         }
         let fall = (-6.0 * dt).exp();
         for p in &mut self.parts {
-            // xorshift: each particle jumps to its own random share of the band
-            self.rng ^= self.rng << 13;
-            self.rng ^= self.rng >> 17;
-            self.rng ^= self.rng << 5;
-            let jitter = 0.5 + 0.5 * (self.rng >> 8) as f32 / (1 << 24) as f32;
+            // each particle jumps to its own random share of the band
+            let jitter = 0.5 + 0.5 * xorshift(&mut self.rng);
             let target = self.level[p.band] * p.shape * jitter;
             (p.h, p.rising) = if target > p.h {
                 (target, true)
@@ -223,10 +227,15 @@ impl Visualizer {
         if self.dims != (h, w) {
             self.layout(h, w);
         }
+        // multi circles overlap: per cell, the particle standing highest is drawn
+        let mut top: Vec<Option<&Particle>> = vec![None; (h.max(0) * w.max(0)) as usize];
         for p in &self.parts {
-            if p.h < SHOW {
-                continue;
+            let t = &mut top[(p.y * w + p.x) as usize];
+            if p.h >= SHOW && t.is_none_or(|t| p.h > t.h) {
+                *t = Some(p);
             }
+        }
+        for p in top.into_iter().flatten() {
             let ladder: &[&str] = if p.rising { &FILLED } else { &HOLLOW };
             let g = ladder[((p.h * ladder.len() as f32) as usize).min(ladder.len() - 1)];
             let color = self.colors[p.band * self.colors.len() / N];
@@ -234,32 +243,108 @@ impl Visualizer {
         }
     }
 
-    /// Place particles: bands split the largest circle that fits into rings,
-    /// each ring's particles sit along its midline, and the last band also
-    /// scatters over everything outside it, out to the edges and corners.
+    /// Place particles: every circle splits into one ring per band, and each
+    /// ring's particles sit along its midline. A single circle is the largest
+    /// that fits, and past its sixth ring the rings keep going, same width,
+    /// out to the corners, the bands cycling round again.
     fn layout(&mut self, h: i64, w: i64) {
         self.dims = (h, w);
-        let aspect = crate::tui::CELL_ASPECT;
-        let rmax = (w as f64 / 2.0).min(h as f64 / 2.0 * aspect).max(1.0);
-        self.parts = (0..h.max(0) * w.max(0))
-            .filter_map(|i| {
-                let (y, x) = (i / w, i % w);
-                let dx = x as f64 + 0.5 - w as f64 / 2.0;
-                let dy = (y as f64 + 0.5 - h as f64 / 2.0) * aspect;
-                let ring = (dx * dx + dy * dy).sqrt() / rmax * N as f64;
-                let band = (ring as usize).min(N - 1);
-                let off = (ring - band as f64 - 0.5).abs();
-                let outer = band == N - 1 && ring > band as f64 + 0.5 && (x * 7 + y * 13) % 5 < 2;
-                (off < 0.3 || outer).then(|| Particle {
-                    y,
-                    x,
-                    band,
-                    shape: 1.0 - off.min(0.5) as f32,
-                    ..Default::default()
+        if !self.multi {
+            let aspect = crate::tui::CELL_ASPECT;
+            let rmax = (w as f64 / 2.0).min(h as f64 / 2.0 * aspect).max(1.0);
+            self.parts = (0..h.max(0) * w.max(0))
+                .filter_map(|i| {
+                    let (y, x) = (i / w, i % w);
+                    let dx = x as f64 + 0.5 - w as f64 / 2.0;
+                    let dy = (y as f64 + 0.5 - h as f64 / 2.0) * aspect;
+                    let ring = (dx * dx + dy * dy).sqrt() / rmax * N as f64;
+                    let off = (ring - (ring as usize) as f64 - 0.5).abs();
+                    (off < 0.3).then(|| Particle {
+                        y,
+                        x,
+                        band: ring as usize % N,
+                        shape: 1.0 - off as f32,
+                        ..Default::default()
+                    })
                 })
-            })
-            .collect();
+                .collect();
+            return;
+        }
+        self.parts.clear();
+        for (cx, cy, r) in circles(h, w, &mut self.rng) {
+            let (y0, y1) = (((cy - r) / ASPECT) as i64, ((cy + r) / ASPECT) as i64);
+            let (x0, x1) = ((cx - r) as i64, (cx + r) as i64);
+            for y in y0.max(0)..=y1.min(h - 1) {
+                for x in x0.max(0)..=x1.min(w - 1) {
+                    let ring = dist(x, y, cx, cy) / r * N as f64;
+                    let band = ring as usize;
+                    let off = (ring - band as f64 - 0.5).abs();
+                    if band < N && off < 0.3 {
+                        self.parts.push(Particle {
+                            y,
+                            x,
+                            band,
+                            shape: 1.0 - off as f32,
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
+        }
     }
+}
+
+const ASPECT: f64 = crate::tui::CELL_ASPECT;
+
+/// Distance from cell (x, y) to a point, in square units: a row is ASPECT
+/// columns tall, so circles come out round.
+fn dist(x: i64, y: i64, cx: f64, cy: f64) -> f64 {
+    let (dx, dy) = (x as f64 + 0.5 - cx, (y as f64 + 0.5) * ASPECT - cy);
+    (dx * dx + dy * dy).sqrt()
+}
+
+/// Random circles (cx, cy, r in square units) until every cell of an h x w
+/// pane lies inside one. Radii run from a fifth to half the pane's shorter
+/// side (never under 6 columns, so six rings still fit), so the count grows
+/// with the pane. Each circle is centered near a random still-uncovered
+/// cell -- off by at most r/2 per axis, so that cell is always covered and
+/// the loop always ends.
+fn circles(h: i64, w: i64, rng: &mut u32) -> Vec<(f64, f64, f64)> {
+    let side = (w as f64).min(h as f64 * ASPECT);
+    let (rmin, rmax) = ((side / 5.0).max(6.0), (side / 2.0).max(6.0));
+    let mut covered = vec![false; (h.max(0) * w.max(0)) as usize];
+    let mut out = Vec::new();
+    loop {
+        let open = covered.iter().filter(|&&c| !c).count();
+        if open == 0 {
+            return out;
+        }
+        let pick = (xorshift(rng) * open as f32) as usize % open;
+        let i = covered
+            .iter()
+            .enumerate()
+            .filter(|c| !c.1)
+            .nth(pick)
+            .unwrap()
+            .0 as i64;
+        let r = rmin + (rmax - rmin) * xorshift(rng) as f64;
+        let mut jog = || (xorshift(rng) as f64 - 0.5) * r;
+        let cx = (i % w) as f64 + 0.5 + jog();
+        let cy = ((i / w) as f64 + 0.5) * ASPECT + jog();
+        for (j, c) in covered.iter_mut().enumerate() {
+            let j = j as i64;
+            *c |= dist(j % w, j / w, cx, cy) < r;
+        }
+        out.push((cx, cy, r));
+    }
+}
+
+/// Uniform 0..1 off a xorshift32 state.
+fn xorshift(s: &mut u32) -> f32 {
+    *s ^= *s << 13;
+    *s ^= *s >> 17;
+    *s ^= *s << 5;
+    (*s >> 8) as f32 / (1 << 24) as f32
 }
 
 #[cfg(test)]
@@ -296,5 +381,38 @@ mod tests {
         let db = db(&Value::Object(meta));
         let loudest = (0..N).max_by(|&a, &b| db[a].total_cmp(&db[b])).unwrap();
         assert_eq!(loudest, 1, "{db:?}");
+    }
+
+    /// The pane's single circle reaches every corner: its rings repeat past
+    /// the sixth, bands cycling.
+    #[test]
+    fn single_circle_reaches_the_corners() {
+        let (h, w) = (24, 80);
+        let mut v = Visualizer::new(false);
+        v.layout(h, w);
+        assert!(
+            v.parts.iter().any(|p| p.y == 0 && p.band < 3),
+            "no repeated rings"
+        );
+        for (cy, cx) in [(0, 0), (0, w - 2), (h - 2, 0), (h - 2, w - 2)] {
+            let near = |p: &&Particle| (cy..cy + 2).contains(&p.y) && (cx..cx + 2).contains(&p.x);
+            assert!(
+                v.parts.iter().any(|p| near(&p)),
+                "corner ({cy}, {cx}) empty"
+            );
+        }
+    }
+
+    #[test]
+    fn circles_cover_every_cell() {
+        let (h, w) = (24, 80);
+        let cs = circles(h, w, &mut 0x9e37_79b9);
+        assert!(cs.len() > 1, "{cs:?}");
+        for (y, x) in (0..h).flat_map(|y| (0..w).map(move |x| (y, x))) {
+            assert!(
+                cs.iter().any(|&(cx, cy, r)| dist(x, y, cx, cy) < r),
+                "({y}, {x}) uncovered"
+            );
+        }
     }
 }

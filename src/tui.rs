@@ -12,7 +12,8 @@
 //!       Esc — or anything that leaves the pane, h/l or '/' — puts the album
 //!       list back.
 //! Keys: h/l switch pane, j/k move, space pause, n/p next/prev, a queue,
-//!       A play-next, r repeat-all, e left-ear, [ ] volume, L like, q quit.
+//!       A play-next, r repeat-all, e left-ear, [ ] volume, L like,
+//!       v full-screen visualizer (browse keys keep working), q quit.
 //!       Queue (a) = play after the whole queue; play-next (A) = play right
 //!       after the current track, queue untouched. Repeat-all (r, browse screen
 //!       only) restarts at track 1 after the last one; while it is on n/p wrap
@@ -689,6 +690,8 @@ struct State {
     flash_ttl: i32,       // half-second ticks the flash stays visible
     flash_tick: Instant,  // last tick taken off flash_ttl
     viz: Visualizer,      // replaces the FOR YOU list while music plays
+    full: bool,           // v: browse screen given over to vfull
+    vfull: Visualizer,
     art_memo: (Option<String>, Option<PathBuf>), // (url, path): cover art of the playing track
 }
 
@@ -714,7 +717,9 @@ impl State {
             flash: String::new(),
             flash_ttl: 0,
             flash_tick: Instant::now(),
-            viz: Visualizer::new(),
+            viz: Visualizer::new(false),
+            full: false,
+            vfull: Visualizer::new(true),
             art_memo: (None, None),
         };
         if authed {
@@ -908,11 +913,35 @@ impl State {
         let prog = env.progress();
         // hidden = frozen, so a focused FOR YOU list or the search screen
         // costs no extra IPC and falls back to the idle refresh rate
-        let hidden = self.screen != Screen::Browse || self.focus == 2 || lay.rcw == 0;
-        let meta = if hidden { None } else { env.viz_meta() };
+        let full = self.full && self.screen == Screen::Browse;
+        let hidden = full || self.screen != Screen::Browse || self.focus == 2 || lay.rcw == 0;
+        let meta = if hidden && !full {
+            None
+        } else {
+            env.viz_meta()
+        };
         self.viz.step(meta.as_ref(), prog.paused || hidden);
+        self.vfull.step(meta.as_ref(), prog.paused || !full);
 
-        if self.screen == Screen::Browse {
+        if full {
+            let art = self.cur_art(env);
+            // same size as the cover pane -> art_grid cache hit
+            let (cols, rows) = ((lay.art_bw - 2).max(1) as usize, lay.art_h.max(1) as usize);
+            self.vfull.set_palette(art.as_deref(), cols, rows);
+            let win = Win {
+                y: 0,
+                x: 0,
+                h: main_h,
+                w,
+            };
+            self.vfull.render(main_h, w, |y, x, g, fg| {
+                let st = Style {
+                    fg: Some(fg),
+                    ..PLAIN
+                };
+                put(&mut buf, win, y, x, g, 1, st)
+            });
+        } else if self.screen == Screen::Browse {
             let title = format!(
                 "NOW: {}",
                 self.now
@@ -1185,6 +1214,7 @@ impl State {
             Char('e') => env.toggle_left_ear(), // left-ear-only; ◐ in the progress bar shows it
             Char('[') => env.volume(-5),    // msm's own volume, not the system's
             Char(']') => env.volume(5),
+            Char('v') => self.full = !self.full, // full-screen visualizer
             Char('h') => self.focus = self.focus.saturating_sub(1),
             Char('l') => self.focus = (self.focus + 1).min(2),
             Char('j') | Down => {
@@ -1414,7 +1444,11 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
         // 500ms timeout: refresh progress even with no keypress; ~30fps while
         // the visualizer animates. Resize and other events just fall through
         // to the next repaint.
-        let tick = if st.viz.live() { 33 } else { 500 };
+        let tick = if st.viz.live() || st.vfull.live() {
+            33
+        } else {
+            500
+        };
         if !event::poll(Duration::from_millis(tick)).unwrap_or(false) {
             continue;
         }
@@ -1650,6 +1684,19 @@ mod tests {
             map_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
             [Other]
         );
+    }
+
+    /// v hands the browse screen to the visualizer and back; the progress
+    /// bar stays, and other keys in between don't drop out of it.
+    #[test]
+    fn v_toggles_the_full_screen_visualizer() {
+        use Key::*;
+        let env = Fake::default();
+        let frames = drive(&env, &[Char('v'), Char(' '), Char('v')], 40, 120);
+        assert!(!frames[1].contains("LOCAL ~/Music"), "{}", frames[1]);
+        assert!(frames[1].contains("0:00 / 0:00"), "{}", frames[1]);
+        assert!(!frames[2].contains("LOCAL ~/Music"), "{}", frames[2]);
+        assert!(frames[3].contains("LOCAL ~/Music"), "{}", frames[3]);
     }
 
     #[test]
