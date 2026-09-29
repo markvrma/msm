@@ -17,27 +17,30 @@ A single Rust binary. No Python, no runtime.
   <img src="docs/screenshot-search.png" width="48%" alt="search screen: results tagged song/album/playlist with artist">
 </p>
 
-## Requirements
-
-Install these separately; they must be on `PATH`:
-
-- `mpv`: playback
-- `yt-dlp`: downloads YouTube tracks into a local cache before playback
-- `cmusfm`: Last.fm scrobbling. Configure it for your Last.fm account first
-  (`cmusfm init`).
-- `ffmpeg` / `ffprobe`: local tags, embedded cover art, and decoding art for display
-
-On macOS:
-
-```sh
-brew install mpv yt-dlp ffmpeg cmus cmusfm
-```
-
-Building needs a Rust toolchain (<https://rustup.rs>).
-
 ## Install
 
+One line, macOS or Linux:
+
 ```sh
+curl -fsSL https://raw.githubusercontent.com/markvrma/yt-music-cli/master/install.sh | sh
+```
+
+The script:
+
+- checks for the runtime tools `mpv`, `yt-dlp`, `ffmpeg` (with `ffprobe`) and
+  `cmusfm`. On macOS with Homebrew it installs any that are missing. Anywhere
+  else it prints the install command for your package manager and stops. It
+  never runs `sudo` for you.
+- needs `cargo` (and a C compiler) already installed. If they're missing it
+  tells you how to get them (<https://rustup.rs>) rather than installing Rust
+  itself.
+- builds and installs `msm` from `master` with `cargo install`, into
+  `~/.cargo/bin`, and warns if that isn't on your `PATH`.
+
+Prefer to do it by hand? Install the tools yourself, then use cargo directly:
+
+```sh
+brew install mpv yt-dlp ffmpeg cmusfm                           # macOS
 cargo install --git https://github.com/markvrma/yt-music-cli   # straight from git
 cargo install --path .                                          # from a local clone
 ```
@@ -48,9 +51,17 @@ Either way the binary lands in `~/.cargo/bin/msm`. Run it from anywhere:
 msm
 ```
 
+Runtime tools, all of which must be on `PATH`:
+
+- `mpv`: playback
+- `yt-dlp`: mpv uses it to stream YouTube tracks
+- `cmusfm`: Last.fm scrobbling. Configure it for your Last.fm account first
+  (`cmusfm init`).
+- `ffmpeg` / `ffprobe`: local tags, embedded cover art, decoding art for display,
+  and the visualizer
+
 Upgrading from the old Python version? Run `pipx uninstall msm-player` (or
-`pip uninstall msm-player`) so only one `msm` is on `PATH`. Auth, history, art
-and the download cache are all kept and read unchanged.
+`pip uninstall msm-player`) so only one `msm` is on `PATH`.
 
 ## Sign in to YouTube Music (optional)
 
@@ -60,31 +71,23 @@ Without signing in, msm searches and plays anonymously. Signing in:
 - turns on `L` (like)
 - swaps the **LAST 5** pane for personalized **FOR YOU** recommendations
 
-msm uses browser-session auth: you copy one request from a logged-in
-`music.youtube.com` tab. YouTube's API rejects ordinary Google OAuth tokens for
-these endpoints, so no Google Cloud project is involved.
+There is nothing to paste. msm reads your session cookies straight from your
+browser's cookie jar, and mpv/yt-dlp use the same jar for playback. Log in to
+<https://music.youtube.com> in Chrome (not incognito), then check it:
 
-1. Open <https://music.youtube.com> in your browser, logged in (not incognito).
-2. Open DevTools (⌥⌘I), go to the **Network** tab, and filter for `/browse`.
-3. Right-click any `POST` request, then **Copy → Copy as cURL**.
-4. Run:
+```sh
+msm auth
+```
 
-   ```sh
-   msm auth
-   ```
-
-   It reads the copied request straight from the clipboard. If the clipboard is
-   empty, it asks you to paste and then press **Ctrl-D**. `msm auth <file>` reads
-   the request from a file instead.
-
-It accepts **Copy as cURL**, **Copy request headers**, or Chrome's alternating
-name/value lines. It writes `~/.config/ymc/browser.json` with mode 600, since the
-file holds your session cookies. It then checks that YouTube really treats the
-session as logged in, and warns you if it doesn't.
+That only reports whether a logged-in session was found; it doesn't save
+anything. Chrome is the default browser. Set `MSM_COOKIE_BROWSER` to use
+another one (`firefox`, `safari`, `brave`, ...). macOS may ask for permission
+to read the browser's cookies the first time.
 
 Plays are recorded to YouTube Music once a track has played for 30s. Last.fm
 scrobbling through cmusfm carries on alongside. If recommendations or history
-stop working later, the session has expired: run `msm auth` again.
+stop working later, the browser session has expired: log in again and re-run
+`msm auth`.
 
 ## Screens
 
@@ -172,19 +175,16 @@ Like `space`, `n` and `p`, `r` works on the browse screen, not inside search res
 
 | path | what |
 |---|---|
-| `~/.config/ymc/browser.json` | YouTube Music session headers (`msm auth`), mode 600 |
 | `~/.config/ymc/history.json` | last 5 albums played |
 | `~/.config/ymc/art/` | cached album art |
-| `~/.cache/msm/<videoId>.m4a` | downloaded YouTube tracks. Never cleared automatically; delete it to reclaim space. |
 | `/tmp/ymc-mpv.log` | verbose mpv log; check it when playback fails |
 
 Local albums are read from `~/Music`, one album per subfolder. Supported files:
 `mp3 flac m4a opus ogg wav aac wma`. Tags come from `ffprobe`, and the files
 play straight from disk.
 
-YouTube tracks are downloaded with `yt-dlp` using your browser's cookies. That
-browser is Chrome by default; set `MSM_COOKIE_BROWSER` to use another one
-(`firefox`, `safari`, `brave`, …).
+YouTube tracks stream straight through mpv's `yt-dlp` hook, using your
+browser's cookies. Nothing is downloaded or cached.
 
 ## Develop
 
