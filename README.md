@@ -156,6 +156,7 @@ These flags appear in front of the label while a mode is on:
 | `e` | left-ear-only: music folded into the left channel, right channel silent |
 | `[` / `]` | volume −5 / +5. This is msm's own mpv volume; the system mixer and other apps are untouched. |
 | `L` | like the highlighted track, or the playing track (needs sign-in) |
+| `v` | full-screen visualizer, above the progress bar. The other browse keys keep working; `v` again goes back. |
 | `/` | search |
 | `Ctrl-Z` | suspend msm and mpv (music stops). Resume with `fg`. |
 | `q`, `Ctrl-C` | quit |

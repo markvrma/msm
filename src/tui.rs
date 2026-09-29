@@ -12,7 +12,8 @@
 //!       Esc — or anything that leaves the pane, h/l or '/' — puts the album
 //!       list back.
 //! Keys: h/l switch pane, j/k move, space pause, n/p next/prev, a queue,
-//!       A play-next, r repeat-all, e left-ear, [ ] volume, L like, q quit.
+//!       A play-next, r repeat-all, e left-ear, [ ] volume, L like,
+//!       v full-screen visualizer (browse keys keep working), q quit.
 //!       Queue (a) = play after the whole queue; play-next (A) = play right
 //!       after the current track, queue untouched. Repeat-all (r, browse screen
 //!       only) restarts at track 1 after the last one; while it is on n/p wrap
@@ -24,6 +25,7 @@
 //! terminal.
 
 use crate::player::Player;
+use crate::visualizer::Visualizer;
 use crate::ytm::Yt;
 use crate::{Album, Item, Track};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -35,11 +37,11 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const ART_CAP: i64 = 18; // max album-art height in cells
-const CELL_ASPECT: f64 = 2.4; // terminal cell height:width. iTerm2/Menlo ~2.4; tune per font
-                              // so the cover reads as a square (art_w = art_h * CELL_ASPECT)
+pub(crate) const CELL_ASPECT: f64 = 2.4; // terminal cell height:width. iTerm2/Menlo ~2.4; tune per font
+                                         // so the cover reads as a square (art_w = art_h * CELL_ASPECT)
 
 // ---- theme (curses init_pair on the default bg, use_default_colors) --------
 
@@ -476,6 +478,7 @@ trait Env {
     fn toggle_loop(&self);
     fn toggle_left_ear(&self);
     fn volume(&self, delta: i64);
+    fn viz_meta(&self) -> Option<serde_json::Value>;
 }
 
 struct Real<'a> {
@@ -559,6 +562,9 @@ impl Env for Real<'_> {
     }
     fn volume(&self, delta: i64) {
         self.player.volume(delta)
+    }
+    fn viz_meta(&self) -> Option<serde_json::Value> {
+        self.player.viz_meta()
     }
 }
 
@@ -681,7 +687,11 @@ struct State {
     drill: Option<usize>, // index into `local` of the album opened inside the LOCAL pane
     dsel: i64,            // selection inside that tracklist
     flash: String,        // transient status shown in the progress bar (e.g. "♥ liked")
-    flash_ttl: i32,       // refresh cycles the flash stays visible
+    flash_ttl: i32,       // half-second ticks the flash stays visible
+    flash_tick: Instant,  // last tick taken off flash_ttl
+    viz: Visualizer,      // replaces the FOR YOU list while music plays
+    full: bool,           // v: browse screen given over to vfull
+    vfull: Visualizer,
     art_memo: (Option<String>, Option<PathBuf>), // (url, path): cover art of the playing track
 }
 
@@ -706,6 +716,10 @@ impl State {
             dsel: 0,
             flash: String::new(),
             flash_ttl: 0,
+            flash_tick: Instant::now(),
+            viz: Visualizer::new(false),
+            full: false,
+            vfull: Visualizer::new(true),
             art_memo: (None, None),
         };
         if authed {
@@ -896,8 +910,38 @@ impl State {
         let mut buf = Buf::new(h, w);
         let lay = layout(h, w);
         let main_h = lay.main_h;
+        let prog = env.progress();
+        // hidden = frozen, so a focused FOR YOU list or the search screen
+        // costs no extra IPC and falls back to the idle refresh rate
+        let full = self.full && self.screen == Screen::Browse;
+        let hidden = full || self.screen != Screen::Browse || self.focus == 2 || lay.rcw == 0;
+        let meta = if hidden && !full {
+            None
+        } else {
+            env.viz_meta()
+        };
+        self.viz.step(meta.as_ref(), prog.paused || hidden);
+        self.vfull.step(meta.as_ref(), prog.paused || !full);
 
-        if self.screen == Screen::Browse {
+        if full {
+            let art = self.cur_art(env);
+            // same size as the cover pane -> art_grid cache hit
+            let (cols, rows) = ((lay.art_bw - 2).max(1) as usize, lay.art_h.max(1) as usize);
+            self.vfull.set_palette(art.as_deref(), cols, rows);
+            let win = Win {
+                y: 0,
+                x: 0,
+                h: main_h,
+                w,
+            };
+            self.vfull.render(main_h, w, |y, x, g, fg| {
+                let st = Style {
+                    fg: Some(fg),
+                    ..PLAIN
+                };
+                put(&mut buf, win, y, x, g, 1, st)
+            });
+        } else if self.screen == Screen::Browse {
             let title = format!(
                 "NOW: {}",
                 self.now
@@ -945,6 +989,7 @@ impl State {
             }
 
             if lay.rcw != 0 {
+                let art = self.cur_art(env);
                 let title2 = if self.authed {
                     "FOR YOU  (enter=open f=play)"
                 } else {
@@ -959,12 +1004,25 @@ impl State {
                     title2,
                     self.focus == 2,
                 ) {
-                    let mut rows2: Vec<String> =
-                        self.pane2().iter().map(|a| a.title.clone()).collect();
-                    if rows2.is_empty() && self.authed {
-                        rows2.push("loading…".into());
+                    if self.viz.live() {
+                        // same size as draw_art below -> art_grid cache hit
+                        let (cols, rows) = ((lay.art_bw - 2) as usize, lay.art_h as usize);
+                        self.viz.set_palette(art.as_deref(), cols, rows);
+                        self.viz.render(w5.h - 2, w5.w - 2, |y, x, g, fg| {
+                            let st = Style {
+                                fg: Some(fg),
+                                ..PLAIN
+                            };
+                            put(&mut buf, w5, 1 + y, 1 + x, g, 1, st)
+                        });
+                    } else {
+                        let mut rows2: Vec<String> =
+                            self.pane2().iter().map(|a| a.title.clone()).collect();
+                        if rows2.is_empty() && self.authed {
+                            rows2.push("loading…".into());
+                        }
+                        draw_rows(&mut buf, w5, &rows2, self.sel[2], self.focus == 2);
                     }
-                    draw_rows(&mut buf, w5, &rows2, self.sel[2], self.focus == 2);
                 }
                 if let Some(wa) = draw_box(
                     &mut buf,
@@ -975,7 +1033,6 @@ impl State {
                     "cover",
                     false,
                 ) {
-                    let art = self.cur_art(env);
                     draw_art(&mut buf, wa, art.as_ref());
                 }
             }
@@ -1007,9 +1064,10 @@ impl State {
         } else {
             String::new()
         };
-        draw_progress(&mut buf, main_h, w, &env.progress(), &note);
-        if self.flash_ttl > 0 {
+        draw_progress(&mut buf, main_h, w, &prog, &note);
+        if self.flash_ttl > 0 && self.flash_tick.elapsed() >= Duration::from_millis(500) {
             self.flash_ttl -= 1;
+            self.flash_tick = Instant::now();
         }
         buf
     }
@@ -1156,6 +1214,7 @@ impl State {
             Char('e') => env.toggle_left_ear(), // left-ear-only; ◐ in the progress bar shows it
             Char('[') => env.volume(-5),    // msm's own volume, not the system's
             Char(']') => env.volume(5),
+            Char('v') => self.full = !self.full, // full-screen visualizer
             Char('h') => self.focus = self.focus.saturating_sub(1),
             Char('l') => self.focus = (self.focus + 1).min(2),
             Char('j') | Down => {
@@ -1382,9 +1441,15 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
         let buf = st.draw(&env, h as i64, w as i64);
         let _ = render(&buf, &mut out);
 
-        // 500ms timeout: refresh progress even with no keypress. Resize and
-        // other events just fall through to the next repaint.
-        if !event::poll(Duration::from_millis(500)).unwrap_or(false) {
+        // 500ms timeout: refresh progress even with no keypress; ~30fps while
+        // the visualizer animates. Resize and other events just fall through
+        // to the next repaint.
+        let tick = if st.viz.live() || st.vfull.live() {
+            33
+        } else {
+            500
+        };
+        if !event::poll(Duration::from_millis(tick)).unwrap_or(false) {
             continue;
         }
         let Ok(Event::Key(k)) = event::read() else {
@@ -1467,6 +1532,9 @@ mod tests {
         fn toggle_loop(&self) {}
         fn toggle_left_ear(&self) {}
         fn volume(&self, _: i64) {}
+        fn viz_meta(&self) -> Option<serde_json::Value> {
+            None
+        }
     }
 
     /// Drive the loop like _Scr: one frame per repaint, then one key; keys
@@ -1616,6 +1684,19 @@ mod tests {
             map_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
             [Other]
         );
+    }
+
+    /// v hands the browse screen to the visualizer and back; the progress
+    /// bar stays, and other keys in between don't drop out of it.
+    #[test]
+    fn v_toggles_the_full_screen_visualizer() {
+        use Key::*;
+        let env = Fake::default();
+        let frames = drive(&env, &[Char('v'), Char(' '), Char('v')], 40, 120);
+        assert!(!frames[1].contains("LOCAL ~/Music"), "{}", frames[1]);
+        assert!(frames[1].contains("0:00 / 0:00"), "{}", frames[1]);
+        assert!(!frames[2].contains("LOCAL ~/Music"), "{}", frames[2]);
+        assert!(frames[3].contains("LOCAL ~/Music"), "{}", frames[3]);
     }
 
     #[test]
