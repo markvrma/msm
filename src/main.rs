@@ -9,6 +9,7 @@ mod auth;
 mod local;
 mod player;
 mod tui;
+mod visualizer;
 mod ytm;
 
 use serde::{Deserialize, Deserializer, Serialize};

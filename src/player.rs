@@ -365,6 +365,7 @@ impl Player {
             .arg(format!("--log-file={log}"))
             .arg("--msg-level=all=v")
             .arg(format!("--input-ipc-server={sock}"))
+            .arg(format!("--af={}", crate::visualizer::af()))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -519,11 +520,20 @@ impl Player {
             .map_or(100, |v| v as i64)
     }
 
-    /// True while left-ear-only is on. pan is the only filter we ever
-    /// add, so a non-empty chain means it is on; an IPC failure reads false
-    /// -- the indicator under-reports, never lies the other way.
+    /// True while left-ear-only is on. pan is the only filter we add besides
+    /// the visualizer's, so any other entry in the chain means it is on; an
+    /// IPC failure reads false -- the indicator under-reports, never lies the
+    /// other way.
     pub fn left_ear(&self) -> bool {
-        truthy(&self.cmd(json!(["get_property", "af"])))
+        let af = self.cmd(json!(["get_property", "af"]));
+        af.as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|a| a.iter().any(|f| f["label"] != crate::visualizer::LABEL))
+    }
+
+    /// Per-band levels the visualizer's filter tagged onto the latest frame.
+    pub fn viz_meta(&self) -> Option<Value> {
+        self.cmd(json!(["get_property", crate::visualizer::META]))
     }
 
     pub fn next(&self) {
@@ -793,7 +803,8 @@ mod tests {
     /// pan filter is on; Ipc::cmd answers None on any failure.
     #[test]
     fn test_left_ear_reads_filter_chain() {
-        for (reply, want) in [(Some(json!([])), false), (Some(json!([{"name": "pan"}])), true), (None, false)] {
+        for (reply, want) in [(Some(json!([])), false), (Some(json!([{"name": "pan"}])), true), (None, false),
+            (Some(json!([{"name": "lavfi", "label": "msmviz"}])), false)] {
             let r = reply.clone();
             let (p, _c, _rx) = player(move |_| r.clone());
             assert_eq!(p.left_ear(), want, "{reply:?}");
