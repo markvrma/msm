@@ -1,6 +1,7 @@
-//! One background mpv for the session, driven over its JSON IPC socket;
-//! yt-dlp fetch cache; cmusfm scrobble bridge. Port of ymc.py's cmusfm /
-//! cache_path / fetch / IPC / Player.
+//! One background mpv for the session, driven over its JSON IPC socket.
+//! Tracks stream straight from YouTube Music via mpv's own yt-dlp hook
+//! (`--ytdl-format`/`--ytdl-raw-options`) — no local download/cache.
+//! cmusfm scrobble bridge; IPC; Player.
 
 use crate::ytm::{self, Yt};
 use crate::Track;
@@ -12,7 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::Duration;
 
@@ -102,60 +103,6 @@ fn cmusfm(status: &str, track: Option<&Track>) {
         });
     }
     let _ = cmd.status();
-}
-
-// ---- yt-dlp cache ------------------------------------------------------------
-
-/// Local file mpv plays: ~/.cache/msm/<vid>.m4a for YT, the path itself for local.
-///
-/// googlevideo now 403s any open-ended `Range: bytes=0-`, which is the only
-/// request ffmpeg knows how to make, so mpv cannot stream YouTube at all —
-/// album art loaded but playback and duration never did. yt-dlp fetches in
-/// bounded chunks, so it downloads and mpv plays the file.
-pub fn cache_path(track: &Track) -> String {
-    // ponytail: --extract-audio --audio-format m4a in fetch() forces the
-    // extension regardless of source itag, so path is known before the
-    // download finishes and mpv can be queued up front.
-    // No query string -> no ?v= (urlparse semantics), so skip the parse.
-    let vid = if track.url.contains('?') {
-        ytm::video_id(&track.url)
-    } else {
-        None
-    };
-    match vid {
-        Some(v) => crate::stream_cache()
-            .join(format!("{v}.m4a"))
-            .to_string_lossy()
-            .into_owned(),
-        None => track.url.clone(),
-    }
-}
-
-/// Download into the cache if missing (yt-dlp argv exactly as ymc.py). -> path.
-pub fn fetch(track: &Track) -> String {
-    let path = cache_path(track);
-    if path == track.url || Path::new(&path).exists() {
-        return path;
-    }
-    let _ = std::fs::create_dir_all(crate::stream_cache());
-    // no --no-part: a killed download leaves a .part file, not a truncated
-    // cache hit that would play as a few seconds of silence forever after.
-    // The web client is the only one still handing out a full-length URL, and
-    // it needs both a signed-in cookie jar and a PO token provider — without
-    // them googlevideo serves the first ~1MB and then 403s.
-    // itag 140 now needs a PO token msm doesn't provide, so it 404s most of
-    // the time — fall back to 18 (muxed mp4, no PO token needed) and strip
-    // the video track back down to m4a so cache_path's extension still holds.
-    let _ = Command::new("yt-dlp")
-        .args(["-q", "--no-warnings", "-f", "140/18/bestaudio"])
-        .args(["--extract-audio", "--audio-format", "m4a"])
-        .args(["--cookies-from-browser", &crate::cookie_browser()])
-        .args(["--extractor-args", "youtube:player_client=web"])
-        .args(["-o", &path, &track.url])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    path
 }
 
 // ---- mpv IPC ---------------------------------------------------------------
@@ -343,7 +290,6 @@ pub struct Player {
     yt: Arc<Yt>,
     ipc: Mutex<Ipc>,
     shared: Arc<Mutex<Shared>>,
-    fetchq: mpsc::Sender<Track>,
     proc: Option<Arc<Mutex<Child>>>,
     quit_done: AtomicBool,
 }
@@ -366,6 +312,11 @@ impl Player {
             .arg("--msg-level=all=v")
             .arg(format!("--input-ipc-server={sock}"))
             .arg(format!("--af={}", crate::visualizer::af()))
+            .arg("--ytdl-format=bestaudio/best")
+            .arg(format!(
+                "--ytdl-raw-options=cookies-from-browser={}",
+                crate::cookie_browser()
+            ))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -380,10 +331,7 @@ impl Player {
                 return Err(e);
             }
         };
-        let (tx, rx) = mpsc::channel::<Track>();
-        // Download queued tracks in playlist order, well ahead of playback.
-        thread::spawn(move || rx.into_iter().for_each(|t| drop(fetch(&t))));
-        let p = Player::with_ipc(yt, ipc, Some(child), tx);
+        let p = Player::with_ipc(yt, ipc, Some(child));
         let (yt, shared, child, sock) =
             (p.yt.clone(), p.shared.clone(), p.proc.clone().unwrap(), sock.to_string());
         // Own IPC connection so the watcher never interleaves with the TUI's.
@@ -401,17 +349,11 @@ impl Player {
         Ok(p)
     }
 
-    fn with_ipc(
-        yt: Arc<Yt>,
-        ipc: Ipc,
-        proc: Option<Arc<Mutex<Child>>>,
-        fetchq: mpsc::Sender<Track>,
-    ) -> Player {
+    fn with_ipc(yt: Arc<Yt>, ipc: Ipc, proc: Option<Arc<Mutex<Child>>>) -> Player {
         Player {
             yt,
             ipc: Mutex::new(ipc),
             shared: Arc::new(Mutex::new(Shared::default())),
-            fetchq,
             proc,
             quit_done: AtomicBool::new(false),
         }
@@ -425,11 +367,7 @@ impl Player {
         if tracks.is_empty() {
             return;
         }
-        fetch(&tracks[0]); // mpv starts on it before playlist-pos is set
-        if start != 0 {
-            fetch(&tracks[start]); // the rest download in the background
-        }
-        let first = cache_path(&tracks[0]);
+        let first = tracks[0].url.clone();
         lock(&self.shared).by_url = HashMap::from([(first.clone(), tracks[0].clone())]);
         self.cmd(json!(["loadfile", first, "replace"]));
         self.enqueue(&tracks[1..]);
@@ -445,10 +383,9 @@ impl Player {
     pub fn enqueue(&self, tracks: &[Track]) {
         lock(&self.shared)
             .by_url
-            .extend(tracks.iter().map(|t| (cache_path(t), t.clone())));
+            .extend(tracks.iter().map(|t| (t.url.clone(), t.clone())));
         for t in tracks {
-            let _ = self.fetchq.send(t.clone());
-            self.cmd(json!(["loadfile", cache_path(t), "append"]));
+            self.cmd(json!(["loadfile", t.url.clone(), "append"]));
         }
     }
 
@@ -463,10 +400,9 @@ impl Player {
         let pos = pos as usize;
         lock(&self.shared)
             .by_url
-            .extend(tracks.iter().map(|t| (cache_path(t), t.clone())));
+            .extend(tracks.iter().map(|t| (t.url.clone(), t.clone())));
         for (i, t) in tracks.iter().enumerate() {
-            let _ = self.fetchq.send(t.clone());
-            self.cmd(json!(["loadfile", cache_path(t), "insert-at", pos + 1 + i]));
+            self.cmd(json!(["loadfile", t.url.clone(), "insert-at", pos + 1 + i]));
         }
         Some(pos + 1)
     }
@@ -659,10 +595,9 @@ mod tests {
         (ipc, cmds)
     }
 
-    fn player(reply: impl FnMut(&Value) -> Option<Value> + Send + 'static) -> (Player, Cmds, mpsc::Receiver<Track>) {
+    fn player(reply: impl FnMut(&Value) -> Option<Value> + Send + 'static) -> (Player, Cmds) {
         let (ipc, cmds) = fake_mpv(reply);
-        let (tx, rx) = mpsc::channel();
-        (Player::with_ipc(Arc::new(Yt { auth: None }), ipc, None, tx), cmds, rx)
+        (Player::with_ipc(Arc::new(Yt::anon()), ipc, None), cmds)
     }
 
     fn by_url(p: &Player) -> HashMap<String, Track> {
@@ -698,7 +633,7 @@ mod tests {
 
     #[test]
     fn test_enqueue_appends_and_merges_by_url() {
-        let (p, cmds, rx) = player(|_| None);
+        let (p, cmds) = player(|_| None);
         let (t1, t2) = (t("u1", "A"), t("u2", "B"));
         p.enqueue(&[t1.clone(), t2.clone()]);
         assert_eq!(
@@ -707,14 +642,12 @@ mod tests {
         );
         // queued tracks resolvable for scrobble
         assert_eq!(by_url(&p), HashMap::from([("u1".into(), t1.clone()), ("u2".into(), t2.clone())]));
-        // download in order
-        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [t1, t2]);
     }
 
     #[test]
     fn test_play_next_inserts_after_current_in_order() {
         // current track at playlist index 2
-        let (p, cmds, _rx) =
+        let (p, cmds) =
             player(|c| (*c == json!(["get_property", "playlist-pos"])).then(|| json!(2)));
         let (t1, t2) = (t("u1", "A"), t("u2", "B"));
         let idx = p.play_next(&[t1.clone(), t2.clone()]);
@@ -733,15 +666,14 @@ mod tests {
 
     #[test]
     fn test_play_next_returns_none_when_idle() {
-        let (p, _cmds, rx) = player(|_| Some(json!(-1))); // mpv reports no current entry
+        let (p, _cmds) = player(|_| Some(json!(-1))); // mpv reports no current entry
         assert_eq!(p.play_next(&[t("u1", "A")]), None);
         assert!(by_url(&p).is_empty()); // nothing queued when idle
-        assert!(rx.try_recv().is_err());
     }
 
     #[test]
     fn test_toggle_loop_uses_cycle_values() {
-        let (p, cmds, _rx) = player(|_| None);
+        let (p, cmds) = player(|_| None);
         p.toggle_loop();
         // cycle-values pins the two states; plain `cycle` would walk force/N too
         assert_eq!(*cmds.lock().unwrap(), [json!(["cycle-values", "loop-playlist", "inf", "no"])]);
@@ -753,14 +685,14 @@ mod tests {
     fn test_looping_reads_mpvs_reply_shapes() {
         for (reply, want) in [(Some(json!(false)), false), (Some(json!("inf")), true), (None, false)] {
             let r = reply.clone();
-            let (p, _c, _rx) = player(move |_| r.clone());
+            let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.looping(), want, "{reply:?}");
         }
     }
 
     #[test]
     fn test_toggle_left_ear_uses_af_toggle() {
-        let (p, cmds, _rx) = player(|_| None);
+        let (p, cmds) = player(|_| None);
         p.toggle_left_ear();
         // `af toggle` is add-if-absent / drop-if-present, so no flag to keep in sync
         assert_eq!(
@@ -771,14 +703,14 @@ mod tests {
 
     #[test]
     fn test_volume_steps_and_reads_back() {
-        let (p, cmds, _rx) = player(|_| None);
+        let (p, cmds) = player(|_| None);
         p.volume(-5);
         p.volume(5);
         // relative `add`, so mpv owns the clamping against --volume-max
         assert_eq!(*cmds.lock().unwrap(), [json!(["add", "volume", -5]), json!(["add", "volume", 5])]);
         for (reply, want) in [(Some(json!(100.0)), 100), (Some(json!(85.0)), 85), (None, 100)] {
             let r = reply.clone();
-            let (p, _c, _rx) = player(move |_| r.clone());
+            let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.volume_pct(), want, "{reply:?}");
         }
     }
@@ -806,7 +738,7 @@ mod tests {
         for (reply, want) in [(Some(json!([])), false), (Some(json!([{"name": "pan"}])), true), (None, false),
             (Some(json!([{"name": "lavfi", "label": "msmviz"}])), false)] {
             let r = reply.clone();
-            let (p, _c, _rx) = player(move |_| r.clone());
+            let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.left_ear(), want, "{reply:?}");
         }
     }
@@ -878,7 +810,7 @@ mod tests {
         );
     }
 
-    /// Port of check_playback.py: a YouTube track downloads and mpv actually
+    /// mpv streams a YouTube Music track live (no download/cache) and actually
     /// decodes audio from it. Own mpv on a private socket so a live msm session
     /// is left alone, but it does play a few seconds of audio out loud.
     #[test]
@@ -892,30 +824,8 @@ mod tests {
             url: "https://music.youtube.com/watch?v=ikKBcZg9jUc".into(),
             ..Default::default()
         };
-        let p = cache_path(&tr);
-        assert!(p.ends_with("ikKBcZg9jUc.m4a"), "{p}");
-        let _ = std::fs::remove_file(&p);
-        assert_eq!(fetch(&tr), p);
-        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        assert!(size > 500_000, "download failed/short");
-        println!("downloaded {size} bytes -> {p}");
 
-        let (_tags, dur) = crate::local::probe(Path::new(&p));
-        assert!(200.0 < dur && dur < 260.0, "bad duration {dur}"); // duration now loads
-        println!("ffprobe duration: {dur:.1} s");
-
-        // local file passes through untouched
-        assert_eq!(cache_path(&t("/Users/x/Music/a.flac", "")), "/Users/x/Music/a.flac");
-
-        // cache hit: second fetch must not re-download
-        let mtime = || std::fs::metadata(&p).unwrap().modified().unwrap();
-        let m = mtime();
-        thread::sleep(Duration::from_secs(1));
-        fetch(&tr);
-        assert_eq!(mtime(), m, "re-downloaded a cached track");
-        println!("cache hit OK");
-
-        let pl = Player::spawn(Arc::new(Yt { auth: None }), "/tmp/ymc-check.sock", "/tmp/ymc-check.log")
+        let pl = Player::spawn(Arc::new(Yt::anon()), "/tmp/ymc-check.sock", "/tmp/ymc-check.log")
             .unwrap();
         pl.play(&[tr], 0);
         let mut ok = false;
