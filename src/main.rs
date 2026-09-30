@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 pub const MPV_SOCK: &str = "/tmp/ymc-mpv.sock";
 pub const MPV_LOG: &str = "/tmp/ymc-mpv.log"; // mpv verbose log — inspect on playback failures
-pub const AUDIO_EXT: &[&str] = &[".mp3", ".flac", ".m4a", ".opus", ".ogg", ".wav", ".aac", ".wma"];
+pub const AUDIO_EXT: &[&str] = &[
+    ".mp3", ".flac", ".m4a", ".opus", ".ogg", ".wav", ".aac", ".wma",
+];
 
 pub fn home() -> PathBuf {
     PathBuf::from(std::env::var("HOME").unwrap_or_default())

@@ -257,14 +257,25 @@ impl Yt {
         } else {
             format!("VL{playlist_id}")
         };
-        let details = call!(self, get_playlist_details, PlaylistID::from_raw(browse_id.as_str()))
-            .map_err(|e| e.to_string())?;
-        let items = call!(self, get_playlist_tracks, PlaylistID::from_raw(browse_id.as_str()))
-            .map_err(|e| e.to_string())?;
+        let details = call!(
+            self,
+            get_playlist_details,
+            PlaylistID::from_raw(browse_id.as_str())
+        )
+        .map_err(|e| e.to_string())?;
+        let items = call!(
+            self,
+            get_playlist_tracks,
+            PlaylistID::from_raw(browse_id.as_str())
+        )
+        .map_err(|e| e.to_string())?;
         Ok(PlaylistPage {
             title: details.title,
             thumb: last_thumbnail(&details.thumbnails),
-            tracks: items.into_iter().filter_map(playlist_item_to_item).collect(),
+            tracks: items
+                .into_iter()
+                .filter_map(playlist_item_to_item)
+                .collect(),
         })
     }
 

@@ -124,7 +124,9 @@ fn sapisid_from_cookie(raw: &str) -> Option<String> {
 /// helpers.get_authorization: "SAPISIDHASH <ts>_<sha1(ts + ' ' + auth)>",
 /// auth = "<sapisid> <origin>".
 fn get_authorization(auth: &str, ts: u64) -> String {
-    let digest = sha1_smol::Sha1::from(format!("{ts} {auth}")).digest().to_string();
+    let digest = sha1_smol::Sha1::from(format!("{ts} {auth}"))
+        .digest()
+        .to_string();
     format!("SAPISIDHASH {ts}_{digest}")
 }
 
@@ -183,7 +185,12 @@ fn visitor_data(html: &str) -> Option<String> {
     };
     let v: serde_json::Value = serde_json::from_str(obj).ok()?;
     let v = v.as_object()?;
-    Some(v.get("VISITOR_DATA").and_then(|x| x.as_str()).unwrap_or("").to_string())
+    Some(
+        v.get("VISITOR_DATA")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+    )
 }
 
 fn skip_ws(s: &str) -> &str {
@@ -196,7 +203,9 @@ fn first_ytcfg(html: &str) -> Option<&str> {
         let at = from + i;
         from = at + 1;
         let rest = skip_ws(&html[at + "ytcfg.set".len()..]);
-        let Some(rest) = rest.strip_prefix('(') else { continue };
+        let Some(rest) = rest.strip_prefix('(') else {
+            continue;
+        };
         let rest = skip_ws(rest);
         if !rest.starts_with('{') {
             continue;
@@ -235,8 +244,16 @@ pub fn check_auth() {
         }
         Some(auth) => {
             let hs = auth.request_headers(YTM_DOMAIN);
-            let cookie = hs.iter().find(|(k, _)| k == "cookie").map(|(_, v)| v.as_str()).unwrap_or("");
-            let ua = hs.iter().find(|(k, _)| k == "user-agent").map(|(_, v)| v.as_str()).unwrap_or("");
+            let cookie = hs
+                .iter()
+                .find(|(k, _)| k == "cookie")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
+            let ua = hs
+                .iter()
+                .find(|(k, _)| k == "user-agent")
+                .map(|(_, v)| v.as_str())
+                .unwrap_or("");
             let logged_in = get_text(YTM_DOMAIN, &[("cookie", cookie), ("user-agent", ua)], 10)
                 .is_some_and(|body| body.contains("\"LOGGED_IN\":true"));
             if logged_in {

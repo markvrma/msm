@@ -144,7 +144,8 @@ pub fn probe(path: &Path) -> (BTreeMap<String, String>, f64) {
             .arg(path),
         15,
     );
-    out.and_then(|(_, stdout)| parse_probe(&stdout)).unwrap_or_default()
+    out.and_then(|(_, stdout)| parse_probe(&stdout))
+        .unwrap_or_default()
 }
 
 fn parse_probe(stdout: &[u8]) -> Option<(BTreeMap<String, String>, f64)> {
@@ -153,7 +154,10 @@ fn parse_probe(stdout: &[u8]) -> Option<(BTreeMap<String, String>, f64)> {
     let mut tags = BTreeMap::new();
     if let Some(t) = fmt.get("tags").and_then(Value::as_object) {
         for (k, val) in t {
-            let s = val.as_str().map(str::to_owned).unwrap_or_else(|| val.to_string());
+            let s = val
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| val.to_string());
             tags.insert(k.to_lowercase(), s);
         }
     }
@@ -189,7 +193,9 @@ pub fn load_local_album(album: &mut Album) {
         let tag = |k: &str| tags.get(k).filter(|s| !s.is_empty()).cloned();
         tracks.push(Track {
             title: tag("title").unwrap_or_else(|| splitext_root(f).to_owned()),
-            artist: tag("artist").or_else(|| tag("album_artist")).unwrap_or_default(),
+            artist: tag("artist")
+                .or_else(|| tag("album_artist"))
+                .unwrap_or_default(),
             album: tag("album").unwrap_or_else(|| album.title.clone()),
             duration: dur as u64,
             url: p.to_string_lossy().into_owned(), // mpv + cmusfm take the local path
@@ -213,7 +219,10 @@ pub fn local_art(dir: &Path, first_file: &Path) -> Option<PathBuf> {
     }
     let cache = art_cache();
     let _ = std::fs::create_dir_all(&cache);
-    let base = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let out = cache.join(format!("local_{}.jpg", truncated(slug(&base), 50)));
     if out.exists() {
         return Some(out);
@@ -227,7 +236,9 @@ pub fn local_art(dir: &Path, first_file: &Path) -> Option<PathBuf> {
         15,
     )
     .is_some_and(|(ok, _)| ok);
-    let nonempty = std::fs::metadata(&out).map(|m| m.len() > 0).unwrap_or(false);
+    let nonempty = std::fs::metadata(&out)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false);
     (ok && nonempty).then_some(out)
 }
 
@@ -289,7 +300,10 @@ fn parse_history(bytes: &[u8]) -> Option<Vec<Album>> {
 
 /// Prepend album, drop older same-title, keep last 5, write, return it.
 pub fn record(title: &str, tracks: &[Track], thumb: &str) -> Vec<Album> {
-    let mut h: Vec<Album> = load_history().into_iter().filter(|a| a.title != title).collect();
+    let mut h: Vec<Album> = load_history()
+        .into_iter()
+        .filter(|a| a.title != title)
+        .collect();
     h.insert(
         0,
         Album {
@@ -334,7 +348,11 @@ impl serde_json::ser::Formatter for PyFormatter {
     }
     // serde already escapes " \ and < 0x20 exactly like Python (\b \f \n \r \t, else \u00XX);
     // we add Python's ensure_ascii: anything outside ' '..'~' -> \uXXXX (surrogate pairs past BMP).
-    fn write_string_fragment<W: ?Sized + Write>(&mut self, w: &mut W, frag: &str) -> io::Result<()> {
+    fn write_string_fragment<W: ?Sized + Write>(
+        &mut self,
+        w: &mut W,
+        frag: &str,
+    ) -> io::Result<()> {
         let mut units = [0u16; 2];
         for c in frag.chars() {
             if (' '..='~').contains(&c) {
@@ -351,7 +369,10 @@ impl serde_json::ser::Formatter for PyFormatter {
 
 fn to_python_json<T: Serialize>(v: &T) -> serde_json::Result<String> {
     let mut buf = Vec::new();
-    v.serialize(&mut serde_json::Serializer::with_formatter(&mut buf, PyFormatter))?;
+    v.serialize(&mut serde_json::Serializer::with_formatter(
+        &mut buf,
+        PyFormatter,
+    ))?;
     Ok(String::from_utf8(buf).expect("ensure_ascii output is ASCII"))
 }
 
@@ -388,7 +409,12 @@ mod tests {
     #[test]
     fn test_history_prepend_dedupe_cap() {
         let h = with_home("hist", |_| {
-            let t = |s: &str| vec![Track { title: s.into(), ..Default::default() }];
+            let t = |s: &str| {
+                vec![Track {
+                    title: s.into(),
+                    ..Default::default()
+                }]
+            };
             for i in 0..7 {
                 record(&format!("Album {i}"), &t("x"), "");
             }
@@ -420,16 +446,27 @@ mod tests {
             url: "/Music/a.mp3".into(),
             thumb: "/art/x.jpg".into(),
         }];
-        let h = vec![Album { title: "Heavy metal".into(), tracks: Some(tracks), ..Default::default() }];
+        let h = vec![Album {
+            title: "Heavy metal".into(),
+            tracks: Some(tracks),
+            ..Default::default()
+        }];
         let ours = to_python_json(&h).unwrap();
         let rust_compact = serde_json::to_string(&h).unwrap();
         let py = Command::new("python3")
-            .args(["-c", "import json,sys; sys.stdout.write(json.dumps(json.loads(sys.stdin.read())))"])
+            .args([
+                "-c",
+                "import json,sys; sys.stdout.write(json.dumps(json.loads(sys.stdin.read())))",
+            ])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn();
         let Ok(mut py) = py else { return }; // no python3: nothing to compare against
-        py.stdin.take().unwrap().write_all(rust_compact.as_bytes()).unwrap();
+        py.stdin
+            .take()
+            .unwrap()
+            .write_all(rust_compact.as_bytes())
+            .unwrap();
         let out = py.wait_with_output().unwrap();
         assert_eq!(ours, String::from_utf8(out.stdout).unwrap());
     }
@@ -438,9 +475,13 @@ mod tests {
     fn test_real_history_reads() {
         // read-only: the real file must parse (never written by tests)
         let _g = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let p = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config/ymc/history.json");
+        let p = PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".config/ymc/history.json");
         if let Ok(b) = std::fs::read(&p) {
-            assert!(parse_history(&b).is_some(), "real history.json failed to parse");
+            assert!(
+                parse_history(&b).is_some(),
+                "real history.json failed to parse"
+            );
         }
     }
 
@@ -518,6 +559,9 @@ mod tests {
         assert_eq!(dur, 198.73);
         assert_eq!(parse_probe(b"{}").unwrap().1, 0.0);
         assert!(parse_probe(b"").is_none());
-        assert_eq!(probe(Path::new("/nonexistent/x.mp3")), (BTreeMap::new(), 0.0));
+        assert_eq!(
+            probe(Path::new("/nonexistent/x.mp3")),
+            (BTreeMap::new(), 0.0)
+        );
     }
 }
