@@ -56,7 +56,9 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
 fn timed<T, E: std::fmt::Display>(
     f: impl std::future::Future<Output = Result<T, E>>,
 ) -> Result<T, String> {
-    match block_on(tokio::time::timeout(TIMEOUT, f)) {
+    // timeout() must be built inside the runtime: its Sleep grabs the
+    // current timer handle on construction and panics outside one.
+    match block_on(async { tokio::time::timeout(TIMEOUT, f).await }) {
         Ok(r) => r.map_err(|e| e.to_string()),
         Err(_) => Err("timed out".into()),
     }
@@ -156,14 +158,17 @@ impl Yt {
         if let Some(c) = self.client.get() {
             return Some(c);
         }
-        let c = block_on(tokio::time::timeout(TIMEOUT, async {
-            if let Some(cookie) = self.auth.as_ref().and_then(Auth::cookie_string) {
-                if let Some(c) = try_authed(cookie).await {
-                    return Some(c);
+        let c = block_on(async {
+            tokio::time::timeout(TIMEOUT, async {
+                if let Some(cookie) = self.auth.as_ref().and_then(Auth::cookie_string) {
+                    if let Some(c) = try_authed(cookie).await {
+                        return Some(c);
+                    }
                 }
-            }
-            anon_client().await
-        }))
+                anon_client().await
+            })
+            .await
+        })
         .ok()
         .flatten()?;
         let _ = self.client.set(c); // lost a race -> keep the winner
@@ -1138,6 +1143,13 @@ fn parse_home_item(result: &Value) -> Option<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_timed_runs_outside_a_runtime() {
+        // Regression: timeout() built outside block_on panicked with
+        // "there is no reactor running" on the first search.
+        assert_eq!(timed(async { Ok::<_, String>(7) }), Ok(7));
+    }
 
     fn fixture(name: &str) -> Value {
         let path = format!("{}/tests/fixtures/{name}.json", env!("CARGO_MANIFEST_DIR"));
