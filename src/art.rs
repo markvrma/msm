@@ -30,7 +30,8 @@ static LIFT: LazyLock<[u8; 256]> = LazyLock::new(|| {
 });
 
 type Key = (PathBuf, usize, usize);
-static GRID_CACHE: LazyLock<Mutex<HashMap<Key, Grid>>> = LazyLock::new(Default::default);
+static GRID_CACHE: LazyLock<Mutex<HashMap<Key, Result<Grid, String>>>> =
+    LazyLock::new(Default::default);
 
 // xterm-256: the 6x6x6 cube levels are NOT evenly spaced, plus a 24-step grey ramp
 const CUBE: [i32; 6] = [0, 95, 135, 175, 215, 255];
@@ -80,11 +81,18 @@ pub fn xterm256(r: u8, g: u8, b: u8) -> u8 {
 pub fn art_grid(path: &Path, cols: usize, rows: usize) -> Result<Grid, String> {
     let key = (path.to_path_buf(), cols, rows);
     if let Some(g) = GRID_CACHE.lock().unwrap().get(&key) {
-        return Ok(g.clone());
+        return g.clone();
     }
     if cols == 0 || rows == 0 {
         return Err("empty art box".into());
     }
+    // negative cache too: draw_art calls this every frame, a bad cover must not respawn ffmpeg
+    let g = render_grid(path, cols, rows);
+    GRID_CACHE.lock().unwrap().insert(key, g.clone());
+    g
+}
+
+fn render_grid(path: &Path, cols: usize, rows: usize) -> Result<Grid, String> {
     let (w, h, px) = decode(path)?;
     let mut img = box_resize(&px, w, h, cols, rows * 2);
     enhance_color(&mut img);
@@ -105,7 +113,6 @@ pub fn art_grid(path: &Path, cols: usize, rows: usize) -> Result<Grid, String> {
                 .collect()
         })
         .collect();
-    GRID_CACHE.lock().unwrap().insert(key, grid.clone());
     Ok(grid)
 }
 
@@ -117,17 +124,19 @@ pub fn art_grid(path: &Path, cols: usize, rows: usize) -> Result<Grid, String> {
 /// which drops alpha without compositing, same as Pillow's convert("RGB").
 fn decode(path: &Path) -> Result<(usize, usize, Vec<u8>), String> {
     let bad = || format!("could not decode {}", path.display());
-    let probe = Command::new("ffprobe")
-        .args(["-v", "quiet", "-select_streams", "v:0", "-show_entries"])
-        .args([
-            "stream=codec_name,width,height,pix_fmt",
-            "-of",
-            "default=nw=1",
-        ])
-        .arg(path)
-        .output()
-        .map_err(|e| format!("ffprobe: {e}"))?;
-    let info = String::from_utf8_lossy(&probe.stdout);
+    let (_, probe_out) = crate::local::run_timeout(
+        Command::new("ffprobe")
+            .args(["-v", "quiet", "-select_streams", "v:0", "-show_entries"])
+            .args([
+                "stream=codec_name,width,height,pix_fmt",
+                "-of",
+                "default=nw=1",
+            ])
+            .arg(path),
+        10,
+    )
+    .ok_or_else(|| "ffprobe failed or timed out".to_string())?;
+    let info = String::from_utf8_lossy(&probe_out);
     let field = |k: &str| {
         info.lines()
             .find_map(|l| l.strip_prefix(k)?.strip_prefix('='))
@@ -151,22 +160,23 @@ fn decode(path: &Path) -> Result<(usize, usize, Vec<u8>), String> {
         _ => w * h + 2 * cw * ch,
     };
     // -noautorotate: Pillow's open() ignores EXIF orientation, so must we
-    let out = Command::new("ffmpeg")
-        .args(["-v", "quiet", "-noautorotate", "-i"])
-        .arg(path)
-        .args([
-            "-frames:v",
-            "1",
-            "-sws_flags",
-            "accurate_rnd+full_chroma_int+bitexact",
-        ])
-        .args(["-f", "rawvideo", "-pix_fmt", fmt, "-"])
-        .output()
-        .map_err(|e| format!("ffmpeg: {e}"))?;
-    if !out.status.success() || out.stdout.len() != want {
+    let (ok, raw) = crate::local::run_timeout(
+        Command::new("ffmpeg")
+            .args(["-v", "quiet", "-noautorotate", "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-sws_flags",
+                "accurate_rnd+full_chroma_int+bitexact",
+            ])
+            .args(["-f", "rawvideo", "-pix_fmt", fmt, "-"]),
+        10,
+    )
+    .ok_or_else(|| "ffmpeg failed or timed out".to_string())?;
+    if !ok || raw.len() != want {
         return Err(bad());
     }
-    let raw = out.stdout;
     let rgb = match fmt {
         "rgb24" => raw,
         "gray" => raw.iter().flat_map(|&v| [v; 3]).collect(),
@@ -327,7 +337,7 @@ fn box_resize(px: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u8> {
 /// Image.blend(img.convert("L").convert("RGB"), img, 1.35): the extrapolating
 /// branch of Blend.c, float math, truncate, clip.
 fn enhance_color(img: &mut [u8]) {
-    for p in img.chunks_exact_mut(3) {
+    for p in img.as_chunks_mut::<3>().0 {
         // Convert.c rgb2l: L24 fixed point
         let l = ((p[0] as u32 * 19595 + p[1] as u32 * 38470 + p[2] as u32 * 7471 + 0x8000) >> 16)
             as i32;
@@ -483,7 +493,7 @@ const COARSE: [u32; 3] = [2, 2, 2];
 /// quantize_octree: (palette of n colors, palette index per pixel).
 fn quantize_octree(img: &[u8], n: u32) -> (Vec<[u8; 3]>, Vec<usize>) {
     let n = n as usize;
-    let pixels: Vec<[u8; 3]> = img.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let pixels: Vec<[u8; 3]> = img.as_chunks::<3>().0.to_vec();
     let mut fine = Cube::new(FINE);
     for &p in &pixels {
         let off = fine.offset(p);
@@ -571,6 +581,9 @@ mod tests {
     /// dark color and covers rendered grey/black. Neutrals must still take the ramp.
     #[test]
     fn test_dark_hues_keep_their_color() {
+        if !crate::on_path("ffmpeg") {
+            return;
+        }
         let dir = std::env::temp_dir().join(format!("msm-art-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for (name, col, grey) in [

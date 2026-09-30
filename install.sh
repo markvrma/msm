@@ -4,7 +4,8 @@
 set -eu
 
 REPO=https://github.com/markvrma/yt-music-cli
-TOOLS="mpv yt-dlp ffmpeg cmusfm"   # ffmpeg also provides ffprobe
+TOOLS="mpv yt-dlp ffmpeg"   # ffmpeg also provides ffprobe
+OPTIONAL="cmusfm"           # Last.fm scrobbling only
 
 have() { command -v "$1" >/dev/null 2>&1; }
 say() { printf '%s\n' "$*"; }
@@ -40,13 +41,13 @@ if [ -n "$missing" ]; then
     else
       say "  use your package manager to install: $missing"
     fi
-    case " $missing " in
-      *" cmusfm "*) [ "$OS" = linux ] &&
-        say "  cmusfm is rarely packaged: build it from https://github.com/Arkq/cmusfm (AUR: cmusfm on Arch)" ;;
-    esac
     exit 1
   fi
 fi
+
+for t in $OPTIONAL; do
+  have "$t" || say "note: optional tool '$t' not found: no Last.fm scrobbling (macOS: brew install cmusfm; Linux: https://github.com/Arkq/cmusfm)"
+done
 
 # 2. Rust toolchain and a C compiler (some dependencies build C code)
 if ! have cargo; then
@@ -77,4 +78,4 @@ esac
 say "installed msm."
 say "next: log in to music.youtube.com in Chrome, then run 'msm auth' to check the session"
 say "      (MSM_COOKIE_BROWSER=firefox|safari|brave|... for another browser), then run 'msm'."
-say "      Last.fm scrobbling needs 'cmusfm init' once."
+say "      Optional Last.fm scrobbling: install cmusfm, then run 'cmusfm init' once."

@@ -5,3 +5,5 @@ dist/
 .venv/
 .DS_Store
 target/
+.pytest_cache/
+.claude/

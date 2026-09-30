@@ -9,6 +9,14 @@ Album art is drawn as pixelated 256-colour half-blocks, so it works in any
 
 A single Rust binary. No Python, no runtime.
 
+> **Disclaimer.** msm is an unofficial, independent project. It is not
+> affiliated with, endorsed by, or sponsored by Google LLC or YouTube.
+> "YouTube" and "YouTube Music" are trademarks of Google LLC. It uses
+> undocumented YouTube Music web APIs, which may break at any time, and using
+> it may be against YouTube's Terms of Service. Use at your own risk.
+
+Developed on macOS; Linux builds and tests run in CI. Windows is not supported.
+
 <p align="center">
   <img src="docs/screenshot-browse.png" width="96%" alt="browse screen: Now Playing tracklist, LOCAL ~/Music album list, FOR YOU recommendations, pixelated cover art, progress bar">
 </p>
@@ -27,10 +35,11 @@ curl -fsSL https://raw.githubusercontent.com/markvrma/yt-music-cli/master/instal
 
 The script:
 
-- checks for the runtime tools `mpv`, `yt-dlp`, `ffmpeg` (with `ffprobe`) and
-  `cmusfm`. On macOS with Homebrew it installs any that are missing. Anywhere
-  else it prints the install command for your package manager and stops. It
-  never runs `sudo` for you.
+- checks for the runtime tools `mpv`, `yt-dlp` and `ffmpeg` (with `ffprobe`).
+  On macOS with Homebrew it installs any that are missing. Anywhere else it
+  prints the install command for your package manager and stops. It never runs
+  `sudo` for you. `cmusfm` (Last.fm scrobbling) is optional: it only notes if
+  it's missing.
 - needs `cargo` (and a C compiler) already installed. If they're missing it
   tells you how to get them (<https://rustup.rs>) rather than installing Rust
   itself.
@@ -40,7 +49,7 @@ The script:
 Prefer to do it by hand? Install the tools yourself, then use cargo directly:
 
 ```sh
-brew install mpv yt-dlp ffmpeg cmusfm                           # macOS
+brew install mpv yt-dlp ffmpeg                                 # macOS (+ cmusfm for scrobbling)
 cargo install --git https://github.com/markvrma/yt-music-cli   # straight from git
 cargo install --path .                                          # from a local clone
 ```
@@ -53,12 +62,19 @@ msm
 
 Runtime tools, all of which must be on `PATH`:
 
-- `mpv`: playback
-- `yt-dlp`: mpv uses it to stream YouTube tracks
-- `cmusfm`: Last.fm scrobbling. Configure it for your Last.fm account first
-  (`cmusfm init`).
-- `ffmpeg` / `ffprobe`: local tags, embedded cover art, decoding art for display,
-  and the visualizer
+- `mpv` (required): playback
+- `yt-dlp` (required): mpv uses it to stream YouTube tracks
+- `cmusfm` (optional): Last.fm scrobbling. Configure it for your Last.fm
+  account first (`cmusfm init`). Without it msm prints a note at startup and
+  doesn't scrobble.
+- `ffmpeg` / `ffprobe` (optional): local tags, embedded cover art, decoding art
+  for display, and the visualizer. Without them those features are missing.
+
+`msm --help` lists the subcommands and environment variables; `msm --version`
+prints the version.
+
+To uninstall: `cargo uninstall msm`, then `rm -rf ~/.config/ymc` to remove the
+history and art cache.
 
 Upgrading from the old Python version? Run `pipx uninstall msm-player` (or
 `pip uninstall msm-player`) so only one `msm` is on `PATH`.
@@ -81,13 +97,24 @@ msm auth
 
 That only reports whether a logged-in session was found; it doesn't save
 anything. Chrome is the default browser. Set `MSM_COOKIE_BROWSER` to use
-another one (`firefox`, `safari`, `brave`, ...). macOS may ask for permission
-to read the browser's cookies the first time.
+another one (`firefox`, `safari`, `brave`, ...; Safari is macOS-only). macOS
+may ask for permission to read the browser's cookies the first time.
 
 Plays are recorded to YouTube Music once a track has played for 30s. Last.fm
 scrobbling through cmusfm carries on alongside. If recommendations or history
 stop working later, the browser session has expired: log in again and re-run
 `msm auth`.
+
+### Privacy & cookies
+
+msm reads your YouTube/Google cookies from the local browser store on each run,
+keeps them only in memory, and never writes them to disk. They are sent only to
+`music.youtube.com` / `s.youtube.com` (and, via yt-dlp, to YouTube for
+playback). Signed in, msm reports your plays to your YouTube history. Nothing is
+sent anywhere else.
+
+Upgrading from the Python version? It stored cookie headers in
+`~/.config/ymc/browser.json`. msm no longer uses it: delete that file.
 
 ## Screens
 
@@ -177,14 +204,43 @@ Like `space`, `n` and `p`, `r` works on the browse screen, not inside search res
 |---|---|
 | `~/.config/ymc/history.json` | last 5 albums played |
 | `~/.config/ymc/art/` | cached album art |
-| `/tmp/ymc-mpv.log` | verbose mpv log; check it when playback fails |
+| `$XDG_RUNTIME_DIR/msm/mpv.log` | verbose mpv log; check it when playback fails |
+| `$XDG_RUNTIME_DIR/msm/mpv.sock` | mpv's IPC socket |
 
-Local albums are read from `~/Music`, one album per subfolder. Supported files:
+Without `XDG_RUNTIME_DIR` the last two live in `$TMPDIR/msm-<uid>/` instead. The
+directory is created `0700`. If another msm is already running, a second one
+refuses to start ("msm is already running").
+
+Environment variables:
+
+| variable | effect |
+|---|---|
+| `MSM_COOKIE_BROWSER` | browser to read YouTube cookies from (default `chrome`) |
+| `MSM_MUSIC_DIR` | local library (default `~/Music`) |
+| `XDG_CONFIG_HOME` | config, history and art under `$XDG_CONFIG_HOME/ymc` |
+| `XDG_RUNTIME_DIR` | mpv socket and log under `$XDG_RUNTIME_DIR/msm` |
+
+Local albums are read from `~/Music` (or `MSM_MUSIC_DIR`), one album per subfolder. Supported files:
 `mp3 flac m4a opus ogg wav aac wma`. Tags come from `ffprobe`, and the files
 play straight from disk.
 
 YouTube tracks stream straight through mpv's `yt-dlp` hook, using your
 browser's cookies. Nothing is downloaded or cached.
+
+## FAQ
+
+**Is this allowed by YouTube?** Probably not by the letter of its Terms of
+Service: msm uses undocumented web APIs and your browser session. See the
+disclaimer at the top. Use at your own risk.
+
+**Are my cookies safe?** They stay in memory and go only to YouTube. See
+[Privacy & cookies](#privacy--cookies).
+
+**Why cmusfm?** It's the Last.fm scrobbler cmus uses. msm feeds it the same
+status events. It's optional.
+
+**Does it download music?** No. Tracks stream through mpv and yt-dlp; nothing
+is saved.
 
 ## Develop
 
@@ -197,4 +253,5 @@ cargo build --release             # -> target/release/msm
 ```
 
 The live checks start a real mpv and restart cmusfm. Quit any running msm
-first, because they share `/tmp/ymc-mpv.sock`.
+first: a second msm refuses to start while one is running, and they share the
+same mpv socket.

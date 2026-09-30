@@ -13,31 +13,80 @@ mod visualizer;
 mod ytm;
 
 use serde::{Deserialize, Deserializer, Serialize};
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-pub const MPV_SOCK: &str = "/tmp/ymc-mpv.sock";
-pub const MPV_LOG: &str = "/tmp/ymc-mpv.log"; // mpv verbose log — inspect on playback failures
-pub const AUDIO_EXT: &[&str] = &[".mp3", ".flac", ".m4a", ".opus", ".ogg", ".wav", ".aac", ".wma"];
+pub const AUDIO_EXT: &[&str] = &[
+    ".mp3", ".flac", ".m4a", ".opus", ".ogg", ".wav", ".aac", ".wma",
+];
 
+/// $HOME, else the passwd entry (cron, systemd, `env -i`); exits if neither,
+/// so nothing is ever written relative to the cwd.
 pub fn home() -> PathBuf {
-    PathBuf::from(std::env::var("HOME").unwrap_or_default())
+    if let Some(h) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+        return h.into();
+    }
+    // SAFETY: getpwuid returns null or a pointer into static storage, copied
+    // out before any other passwd call.
+    let dir = unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        (!pw.is_null() && !(*pw).pw_dir.is_null())
+            .then(|| std::ffi::CStr::from_ptr((*pw).pw_dir).to_bytes().to_vec())
+    };
+    match dir.filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(std::ffi::OsString::from_vec(d)),
+        None => {
+            eprintln!("HOME not set");
+            std::process::exit(1);
+        }
+    }
 }
-/// ~/.config/ymc
+/// Non-empty env var as a path. Ignored under test so the HOME-repointing
+/// tests never touch a developer's real config or library.
+fn env_dir(var: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty() && !cfg!(test))
+        .map(PathBuf::from)
+}
+/// $XDG_CONFIG_HOME/ymc, else ~/.config/ymc
 pub fn config_dir() -> PathBuf {
-    home().join(".config/ymc")
+    env_dir("XDG_CONFIG_HOME").map_or_else(|| home().join(".config/ymc"), |d| d.join("ymc"))
 }
-/// ~/.config/ymc/history.json
+/// config_dir()/history.json
 pub fn hist_path() -> PathBuf {
     config_dir().join("history.json")
 }
-/// ~/.config/ymc/art
+/// config_dir()/art
 pub fn art_cache() -> PathBuf {
     config_dir().join("art")
 }
-/// ~/Music
+/// $MSM_MUSIC_DIR, else ~/Music
 pub fn local_music() -> PathBuf {
-    home().join("Music")
+    env_dir("MSM_MUSIC_DIR").unwrap_or_else(|| home().join("Music"))
+}
+/// Per-user dir for mpv's IPC socket and verbose log (inspect it on playback
+/// failures): $XDG_RUNTIME_DIR/msm, else $TMPDIR/msm-<uid> ($TMPDIR is
+/// already per-user on macOS). Created 0700 and checked to be ours, so other
+/// local users can't read the log (listening history), block the socket, or
+/// plant a symlink for mpv to write through.
+pub fn run_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    // SAFETY: getuid cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let d = match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        Some(r) => PathBuf::from(r).join("msm"),
+        None => std::env::temp_dir().join(format!("msm-{uid}")),
+    };
+    let _ = std::fs::DirBuilder::new().mode(0o700).create(&d);
+    let m = std::fs::symlink_metadata(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    if !m.is_dir() || m.uid() != uid || m.mode() & 0o077 != 0 {
+        return Err(format!(
+            "{}: not a private directory owned by you",
+            d.display()
+        ));
+    }
+    Ok(d)
 }
 /// $MSM_COOKIE_BROWSER, default "chrome"
 pub fn cookie_browser() -> String {
@@ -108,17 +157,56 @@ pub struct Item {
     pub thumb: String,
 }
 
+const USAGE: &str = "\
+usage: msm          start the player
+       msm auth     check YouTube Music sign-in
+       msm -h|--help, -V|--version
+
+env:
+  MSM_COOKIE_BROWSER  browser to read YouTube cookies from (default chrome)
+  MSM_MUSIC_DIR       local library (default ~/Music)
+  XDG_CONFIG_HOME     config/history/art under $XDG_CONFIG_HOME/ymc (default ~/.config/ymc)
+  XDG_RUNTIME_DIR     mpv socket + log under $XDG_RUNTIME_DIR/msm (default $TMPDIR/msm-<uid>)
+";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.get(1).map(String::as_str) == Some("auth") {
-        auth::check_auth();
-        return;
+    match args.get(1).map(String::as_str) {
+        None => {}
+        Some("auth") => {
+            auth::check_auth();
+            return;
+        }
+        Some("-h" | "--help") => {
+            print!("{USAGE}");
+            return;
+        }
+        Some("-V" | "--version") => {
+            println!("msm {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Some(a) => {
+            eprint!("msm: unknown argument '{a}'\n\n{USAGE}");
+            std::process::exit(2);
+        }
     }
-    for tool in ["mpv", "cmusfm"] {
+    for tool in ["mpv", "yt-dlp"] {
         if !on_path(tool) {
             eprintln!("missing required tool: {tool}");
             std::process::exit(1);
         }
+    }
+    for (tool, lost) in [
+        ("ffmpeg", "local album art"),
+        ("ffprobe", "local track tags and durations"),
+        ("cmusfm", "Last.fm scrobbling"),
+    ] {
+        if !on_path(tool) {
+            eprintln!("note: {tool} not found; no {lost}");
+        }
+    }
+    if !on_path("cmusfm") {
+        player::SCROBBLE.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     let yt = Arc::new(ytm::get_yt());
     let player = match player::Player::new(yt.clone()) {
@@ -148,4 +236,26 @@ pub fn on_path(tool: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn test_run_dir_is_private_and_rejects_loose_modes() {
+        // only run_dir reads XDG_RUNTIME_DIR
+        let base = std::env::temp_dir().join(format!("msm-rundir-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        std::env::set_var("XDG_RUNTIME_DIR", &base);
+        let d = super::run_dir().unwrap();
+        assert_eq!(d, base.join("msm"));
+        let mode = std::fs::metadata(&d).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        // a dir others can enter (pre-planted, or chmod'd) is refused
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::run_dir().is_err());
+        std::env::remove_var("XDG_RUNTIME_DIR");
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

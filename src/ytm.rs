@@ -51,6 +51,17 @@ fn block_on<F: std::future::Future>(f: F) -> F::Output {
     .block_on(f)
 }
 
+/// `block_on` bounded by TIMEOUT. ytmapi-rs's reqwest client has no timeout
+/// of its own, and these run on the UI thread.
+fn timed<T, E: std::fmt::Display>(
+    f: impl std::future::Future<Output = Result<T, E>>,
+) -> Result<T, String> {
+    match block_on(tokio::time::timeout(TIMEOUT, f)) {
+        Ok(r) => r.map_err(|e| e.to_string()),
+        Err(_) => Err("timed out".into()),
+    }
+}
+
 enum YtClient {
     Auth(YtMusic<BrowserToken>),
     Anon(YtMusic<NoAuthToken>),
@@ -66,23 +77,23 @@ async fn try_authed(cookie: &str) -> Option<YtClient> {
     Some(YtClient::Auth(yt))
 }
 
-async fn anon_client() -> YtClient {
-    YtClient::Anon(
-        YtMusic::new_unauthenticated()
-            .await
-            .expect("anonymous ytmusic client"),
-    )
+async fn anon_client() -> Option<YtClient> {
+    YtMusic::new_unauthenticated()
+        .await
+        .ok()
+        .map(YtClient::Anon)
 }
 
 /// Dispatch a `ytmapi-rs` simplified-query method to whichever client variant
 /// is live. Both `YtMusic<BrowserToken>` and `YtMusic<NoAuthToken>` expose the
 /// same inherent methods (from `impl<A: AuthToken> YtMusic<A>`), so the two
-/// match arms just monomorphize separately.
+/// match arms just monomorphize separately. Yields `Result<T, String>`.
 macro_rules! call {
     ($self:expr, $method:ident $(, $arg:expr)*) => {
         match $self.client() {
-            YtClient::Auth(c) => block_on(c.$method($($arg),*)),
-            YtClient::Anon(c) => block_on(c.$method($($arg),*)),
+            Some(YtClient::Auth(c)) => timed(c.$method($($arg),*)),
+            Some(YtClient::Anon(c)) => timed(c.$method($($arg),*)),
+            None => Err("offline / YouTube unreachable".to_string()),
         }
     };
 }
@@ -139,31 +150,35 @@ impl Yt {
         self.auth.is_some()
     }
 
-    fn client(&self) -> &YtClient {
-        self.client.get_or_init(|| {
-            block_on(async {
-                if let Some(cookie) = self.auth.as_ref().and_then(Auth::cookie_string) {
-                    if let Some(c) = try_authed(cookie).await {
-                        return c;
-                    }
+    /// None when the client can't be built (offline, timed out). Failures
+    /// aren't cached, so the next call retries.
+    fn client(&self) -> Option<&YtClient> {
+        if let Some(c) = self.client.get() {
+            return Some(c);
+        }
+        let c = block_on(tokio::time::timeout(TIMEOUT, async {
+            if let Some(cookie) = self.auth.as_ref().and_then(Auth::cookie_string) {
+                if let Some(c) = try_authed(cookie).await {
+                    return Some(c);
                 }
-                anon_client().await
-            })
-        })
+            }
+            anon_client().await
+        }))
+        .ok()
+        .flatten()?;
+        let _ = self.client.set(c); // lost a race -> keep the winner
+        self.client.get()
     }
 
     /// yt.search(query, filter=...) with filter in {"songs","albums","playlists"}.
     pub fn search(&self, query: &str, filter: &str) -> Result<Vec<Item>, String> {
         match filter {
             "songs" => call!(self, search_songs, query)
-                .map(|v| v.into_iter().map(item_from_song).collect())
-                .map_err(|e| e.to_string()),
+                .map(|v| v.into_iter().map(item_from_song).collect()),
             "albums" => call!(self, search_albums, query)
-                .map(|v| v.into_iter().map(item_from_album).collect())
-                .map_err(|e| e.to_string()),
+                .map(|v| v.into_iter().map(item_from_album).collect()),
             "playlists" => call!(self, search_playlists, query)
-                .map(|v| v.into_iter().filter_map(item_from_playlist).collect())
-                .map_err(|e| e.to_string()),
+                .map(|v| v.into_iter().filter_map(item_from_playlist).collect()),
             _ => Err(format!("unsupported filter {filter:?}")),
         }
     }
@@ -200,10 +215,11 @@ impl Yt {
             return false;
         };
         match self.client() {
-            YtClient::Auth(c) => {
-                block_on(c.rate_song(VideoID::from_raw(vid), LikeStatus::Liked)).is_ok()
+            Some(YtClient::Auth(c)) => {
+                timed(c.rate_song(VideoID::from_raw(vid), LikeStatus::Liked)).is_ok()
             }
-            YtClient::Anon(_) => false, // cookie didn't validate
+            Some(YtClient::Anon(_)) => false, // cookie didn't validate
+            None => false,                    // offline
         }
     }
 
@@ -225,8 +241,7 @@ impl Yt {
     // ---- ytmapi-rs result -> msm Item/AlbumPage/PlaylistPage ----------------
 
     fn get_album(&self, browse_id: &str) -> Result<AlbumPage, String> {
-        let alb =
-            call!(self, get_album, AlbumID::from_raw(browse_id)).map_err(|e| e.to_string())?;
+        let alb = call!(self, get_album, AlbumID::from_raw(browse_id))?;
         Ok(AlbumPage {
             title: alb.title,
             artists: alb.artists.into_iter().map(|a| a.name).collect(),
@@ -257,14 +272,23 @@ impl Yt {
         } else {
             format!("VL{playlist_id}")
         };
-        let details = call!(self, get_playlist_details, PlaylistID::from_raw(browse_id.as_str()))
-            .map_err(|e| e.to_string())?;
-        let items = call!(self, get_playlist_tracks, PlaylistID::from_raw(browse_id.as_str()))
-            .map_err(|e| e.to_string())?;
+        let details = call!(
+            self,
+            get_playlist_details,
+            PlaylistID::from_raw(browse_id.as_str())
+        )?;
+        let items = call!(
+            self,
+            get_playlist_tracks,
+            PlaylistID::from_raw(browse_id.as_str())
+        )?;
         Ok(PlaylistPage {
             title: details.title,
             thumb: last_thumbnail(&details.thumbnails),
-            tracks: items.into_iter().filter_map(playlist_item_to_item).collect(),
+            tracks: items
+                .into_iter()
+                .filter_map(playlist_item_to_item)
+                .collect(),
         })
     }
 
@@ -761,8 +785,12 @@ fn recs_from_rows(rows: Result<Vec<HomeRow>, String>, limit: usize) -> Vec<Album
     let Ok(rows) = rows else { return Vec::new() };
     let mut out = Vec::new();
     for item in rows.into_iter().flat_map(|r| r.contents) {
-        if item.video_id.is_none() && item.browse_id.is_none() && item.playlist_id.is_none() {
-            continue; // header/shelf/artist -> not playable here
+        let album = item
+            .browse_id
+            .as_deref()
+            .is_some_and(|b| b.starts_with("MPRE"));
+        if item.video_id.is_none() && item.playlist_id.is_none() && !album {
+            continue; // header/shelf/artist/podcast show -> not playable here
         }
         if item.title.is_empty() {
             continue;
@@ -1426,6 +1454,10 @@ mod tests {
                         ..item("Album", None, &[])
                     },
                     item("", Some("v2"), &[]), // no title -> dropped
+                    Item {
+                        browse_id: Some("UCartist".into()),
+                        ..item("Artist", None, &[])
+                    }, // artist channel -> dropped
                 ],
             },
         ];

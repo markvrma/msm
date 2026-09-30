@@ -1,0 +1,50 @@
+name: Bug report
+description: Something in msm is broken
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: msm version
+      description: msm has no --version flag yet: give the git commit (`git rev-parse --short HEAD`) or install date.
+    validations: {required: true}
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64 / Ubuntu 24.04 x86_64
+    validations: {required: true}
+  - type: input
+    id: tools
+    attributes:
+      label: mpv and yt-dlp versions
+      description: First line of `mpv --version` and `yt-dlp --version`.
+    validations: {required: true}
+  - type: input
+    id: terminal
+    attributes:
+      label: Terminal
+      placeholder: iTerm2, Terminal.app, kitty, tmux inside Alacritty ...
+    validations: {required: true}
+  - type: dropdown
+    id: browser
+    attributes:
+      label: Browser used for YouTube Music login
+      options: [Chrome, Firefox, Safari, Brave, Edge, Other, Not logged in]
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Press / and search ...\n2. ..."
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected vs actual behaviour
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Output of `msm auth`, and the tail of mpv's log if playback is the problem. Remove cookies and tokens first.
+      render: shell

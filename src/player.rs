@@ -44,6 +44,9 @@ fn truthy(v: &Option<Value>) -> bool {
 
 // ---- cmusfm scrobble bridge ------------------------------------------------
 
+/// False when cmusfm isn't installed (main clears it): scrobbling is optional.
+pub static SCROBBLE: AtomicBool = AtomicBool::new(true);
+
 /// Kill any stale cmusfm server; the next cmusfm call forks a fresh one.
 ///
 /// cmusfm's daemon caches a Last.fm failure for 30 min (SERVICE_RETRY_DELAY) and
@@ -51,6 +54,9 @@ fn truthy(v: &Option<Value>) -> bool {
 /// sleep/wake it can sit there for the rest of the session with no error
 /// anywhere. Cheaper to start each msm session with a new daemon.
 fn cmusfm_reset() {
+    if !SCROBBLE.load(Ordering::Relaxed) {
+        return;
+    }
     // SIGKILL, not SIGTERM: a TERM'd server unblocks its poll() but then hangs
     // in the curl teardown with the listening socket still open, so
     // cmusfm_server_check() keeps connecting to a corpse and every status
@@ -83,6 +89,9 @@ pub fn cmusfm_argv(status: &str, track: Option<&Track>) -> Vec<String> {
 
 /// Fire cmusfm the way cmus does as status_display_program.
 fn cmusfm(status: &str, track: Option<&Track>) {
+    if !SCROBBLE.load(Ordering::Relaxed) {
+        return;
+    }
     let argv = cmusfm_argv(status, track);
     // New process group (Python: start_new_session): the daemon is forked by
     // *this* client, so without it it lands in msm's process group and Ctrl+Z
@@ -125,7 +134,11 @@ impl Ipc {
             if let Ok(sock) = UnixStream::connect(path) {
                 let _ = sock.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = sock.set_write_timeout(Some(Duration::from_secs(2)));
-                return Ok(Ipc { sock, buf: Vec::new(), rid: 0 });
+                return Ok(Ipc {
+                    sock,
+                    buf: Vec::new(),
+                    rid: 0,
+                });
             }
             thread::sleep(Duration::from_millis(100));
         }
@@ -222,7 +235,11 @@ impl Watch {
             ev.push(Event::Cmusfm("stopped", s.current.take()));
             self.last_path = None;
         } else if s.current.is_some() && pause.is_some() && pause != self.last_pause {
-            let status = if pause == Some(true) { "paused" } else { "playing" };
+            let status = if pause == Some(true) {
+                "paused"
+            } else {
+                "playing"
+            };
             ev.push(Event::Cmusfm(status, s.current.clone()));
             self.last_pause = pause;
         }
@@ -252,8 +269,12 @@ fn watch_loop(
             .cmd(json!(["get_property", "path"]))
             .and_then(|v| v.as_str().map(String::from))
             .filter(|p| !p.is_empty());
-        let pause = ipc.cmd(json!(["get_property", "pause"])).and_then(|v| v.as_bool());
-        let raw = ipc.cmd(json!(["get_property", "time-pos"])).and_then(|v| v.as_f64());
+        let pause = ipc
+            .cmd(json!(["get_property", "pause"]))
+            .and_then(|v| v.as_bool());
+        let raw = ipc
+            .cmd(json!(["get_property", "time-pos"]))
+            .and_then(|v| v.as_f64());
         let events = w.step(path, pause, raw, &mut lock(shared));
         events.into_iter().for_each(&mut emit);
         thread::sleep(tick);
@@ -295,32 +316,54 @@ pub struct Player {
 }
 
 impl Player {
-    /// cmusfm_reset, remove stale socket, spawn mpv, connect IPC, start
-    /// fetcher + watcher threads. Err(message) if mpv/IPC fails.
+    /// Refuse if another msm is live, cmusfm_reset, remove stale socket,
+    /// spawn mpv, connect IPC, start fetcher + watcher threads. Err(message)
+    /// if mpv/IPC fails.
     pub fn new(yt: Arc<Yt>) -> Result<Player, String> {
-        Player::spawn(yt, crate::MPV_SOCK, crate::MPV_LOG)
+        let dir = crate::run_dir()?;
+        let path = |f: &str| dir.join(f).to_string_lossy().into_owned();
+        Player::spawn(yt, &path("mpv.sock"), &path("mpv.log"))
     }
 
     fn spawn(yt: Arc<Yt>, sock: &str, log: &str) -> Result<Player, String> {
+        // A live socket is another msm's mpv (maybe Ctrl-Z'd): leave it and
+        // its cmusfm alone.
+        if UnixStream::connect(sock).is_ok() {
+            return Err("msm is already running (fg it, or quit it first)".into());
+        }
         cmusfm_reset();
         if Path::new(sock).exists() {
             std::fs::remove_file(sock).map_err(|e| format!("{sock}: {e}"))?;
         }
-        let child = Command::new("mpv")
-            .args(["--idle=yes", "--no-video", "--no-terminal"])
+        let mut cmd = Command::new("mpv");
+        cmd.args(["--idle=yes", "--no-video", "--no-terminal"])
             .arg(format!("--log-file={log}"))
             .arg("--msg-level=all=v")
             .arg(format!("--input-ipc-server={sock}"))
             .arg(format!("--af={}", crate::visualizer::af()))
             .arg("--ytdl-format=bestaudio/best")
-            .arg(format!(
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Only when auth actually found a session in that browser: without
+        // one, yt-dlp dies on the missing cookie db and nothing plays, while
+        // anonymous playback works fine.
+        if yt.authed() {
+            cmd.arg(format!(
                 "--ytdl-raw-options=cookies-from-browser={}",
                 crate::cookie_browser()
-            ))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("mpv: {e}"))?;
+            ));
+        }
+        // SIGKILL'd msm runs no destructor; have the kernel take mpv down too
+        // instead of leaving it playing, orphaned. Linux only (no macOS twin).
+        #[cfg(target_os = "linux")]
+        // SAFETY: prctl is async-signal-safe, the only call between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().map_err(|e| format!("mpv: {e}"))?;
         let child = Arc::new(Mutex::new(child));
         let ipc = match Ipc::connect(sock, || child_alive(&child)) {
             Ok(ipc) => ipc,
@@ -328,23 +371,31 @@ impl Player {
                 let mut c = lock(&child);
                 let _ = c.kill();
                 let _ = c.wait();
-                return Err(e);
+                return Err(format!("{e} (see {log})"));
             }
         };
         let p = Player::with_ipc(yt, ipc, Some(child));
-        let (yt, shared, child, sock) =
-            (p.yt.clone(), p.shared.clone(), p.proc.clone().unwrap(), sock.to_string());
+        let (yt, shared, child, sock) = (
+            p.yt.clone(),
+            p.shared.clone(),
+            p.proc.clone().unwrap(),
+            sock.to_string(),
+        );
         // Own IPC connection so the watcher never interleaves with the TUI's.
         thread::spawn(move || {
             let Ok(mut ipc) = Ipc::connect(&sock, || child_alive(&child)) else {
                 return;
             };
-            watch_loop(&mut ipc, || child_alive(&child), &shared, Duration::from_secs(1), |e| {
-                match e {
+            watch_loop(
+                &mut ipc,
+                || child_alive(&child),
+                &shared,
+                Duration::from_secs(1),
+                |e| match e {
                     Event::Cmusfm(s, t) => cmusfm(s, t.as_ref()),
                     Event::Record(t) => record_yt(&yt, &t, 30),
-                }
-            });
+                },
+            );
         });
         Ok(p)
     }
@@ -393,7 +444,9 @@ impl Player {
     /// The rest of the queue is left untouched; on None the caller should
     /// start playback instead.
     pub fn play_next(&self, tracks: &[Track]) -> Option<usize> {
-        let pos = self.cmd(json!(["get_property", "playlist-pos"]))?.as_i64()?;
+        let pos = self
+            .cmd(json!(["get_property", "playlist-pos"]))?
+            .as_i64()?;
         if pos < 0 {
             return None;
         }
@@ -401,8 +454,16 @@ impl Player {
         lock(&self.shared)
             .by_url
             .extend(tracks.iter().map(|t| (t.url.clone(), t.clone())));
+        // append + playlist-move, not `loadfile … insert-at` (mpv >= 0.38
+        // only; Ubuntu 24.04 ships 0.37, Debian 12 0.35).
         for (i, t) in tracks.iter().enumerate() {
-            self.cmd(json!(["loadfile", t.url.clone(), "insert-at", pos + 1 + i]));
+            self.cmd(json!(["loadfile", t.url.clone(), "append"]));
+            if let Some(n) = self
+                .cmd(json!(["get_property", "playlist-count"]))
+                .and_then(|v| v.as_u64())
+            {
+                self.cmd(json!(["playlist-move", n - 1, pos + 1 + i]));
+            }
         }
         Some(pos + 1)
     }
@@ -546,7 +607,11 @@ mod tests {
     }
 
     fn t(url: &str, title: &str) -> Track {
-        Track { url: url.into(), title: title.into(), ..Default::default() }
+        Track {
+            url: url.into(),
+            title: title.into(),
+            ..Default::default()
+        }
     }
 
     type Cmds = Arc<Mutex<Vec<Value>>>;
@@ -628,7 +693,10 @@ mod tests {
 
     #[test]
     fn test_cmusfm_stopped_has_no_track() {
-        assert_eq!(cmusfm_argv("stopped", None), ["cmusfm", "status", "stopped"]);
+        assert_eq!(
+            cmusfm_argv("stopped", None),
+            ["cmusfm", "status", "stopped"]
+        );
     }
 
     #[test]
@@ -638,30 +706,72 @@ mod tests {
         p.enqueue(&[t1.clone(), t2.clone()]);
         assert_eq!(
             *cmds.lock().unwrap(),
-            [json!(["loadfile", "u1", "append"]), json!(["loadfile", "u2", "append"])]
+            [
+                json!(["loadfile", "u1", "append"]),
+                json!(["loadfile", "u2", "append"])
+            ]
         );
         // queued tracks resolvable for scrobble
-        assert_eq!(by_url(&p), HashMap::from([("u1".into(), t1.clone()), ("u2".into(), t2.clone())]));
+        assert_eq!(
+            by_url(&p),
+            HashMap::from([("u1".into(), t1.clone()), ("u2".into(), t2.clone())])
+        );
     }
 
     #[test]
     fn test_play_next_inserts_after_current_in_order() {
-        // current track at playlist index 2
-        let (p, cmds) =
-            player(|c| (*c == json!(["get_property", "playlist-pos"])).then(|| json!(2)));
+        // current track at playlist index 2 of 6; each append grows the count
+        let mut count = 6;
+        let (p, cmds) = player(move |c| {
+            if c[0] == "loadfile" {
+                count += 1;
+            }
+            match c[1].as_str() {
+                Some("playlist-pos") => Some(json!(2)),
+                Some("playlist-count") => Some(json!(count)),
+                _ => None,
+            }
+        });
         let (t1, t2) = (t("u1", "A"), t("u2", "B"));
         let idx = p.play_next(&[t1.clone(), t2.clone()]);
         assert_eq!(idx, Some(3)); // first inserted right after current (2 -> 3)
-        let loads: Vec<Value> =
-            cmds.lock().unwrap().iter().filter(|c| c[0] == "loadfile").cloned().collect();
+        let edits: Vec<Value> = cmds
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| c[0] == "loadfile" || c[0] == "playlist-move")
+            .cloned()
+            .collect();
+        // append + move works on every mpv; `insert-at` needs >= 0.38
         assert_eq!(
-            loads,
+            edits,
             [
-                json!(["loadfile", "u1", "insert-at", 3]),
-                json!(["loadfile", "u2", "insert-at", 4]), // order preserved, not reversed
+                json!(["loadfile", "u1", "append"]),
+                json!(["playlist-move", 6, 3]),
+                json!(["loadfile", "u2", "append"]),
+                json!(["playlist-move", 7, 4]), // order preserved, not reversed
             ]
         );
-        assert_eq!(by_url(&p), HashMap::from([("u1".into(), t1), ("u2".into(), t2)]));
+        assert_eq!(
+            by_url(&p),
+            HashMap::from([("u1".into(), t1), ("u2".into(), t2)])
+        );
+    }
+
+    #[test]
+    fn test_spawn_refuses_when_another_msm_is_live() {
+        let sock = std::env::temp_dir().join(format!("msm-live-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock);
+        let _l = UnixListener::bind(&sock).unwrap();
+        let s = sock.to_str().unwrap();
+        // refused before cmusfm_reset or mpv spawn; the live socket survives
+        let e = Player::spawn(Arc::new(Yt::anon()), s, "/dev/null").err();
+        assert_eq!(
+            e.as_deref(),
+            Some("msm is already running (fg it, or quit it first)")
+        );
+        assert!(sock.exists());
+        let _ = std::fs::remove_file(&sock);
     }
 
     #[test]
@@ -676,14 +786,21 @@ mod tests {
         let (p, cmds) = player(|_| None);
         p.toggle_loop();
         // cycle-values pins the two states; plain `cycle` would walk force/N too
-        assert_eq!(*cmds.lock().unwrap(), [json!(["cycle-values", "loop-playlist", "inf", "no"])]);
+        assert_eq!(
+            *cmds.lock().unwrap(),
+            [json!(["cycle-values", "loop-playlist", "inf", "no"])]
+        );
     }
 
     /// mpv answers false for off and the string "inf" for on; Ipc::cmd answers
     /// None on any failure. Verified live against mpv v0.41.0.
     #[test]
     fn test_looping_reads_mpvs_reply_shapes() {
-        for (reply, want) in [(Some(json!(false)), false), (Some(json!("inf")), true), (None, false)] {
+        for (reply, want) in [
+            (Some(json!(false)), false),
+            (Some(json!("inf")), true),
+            (None, false),
+        ] {
             let r = reply.clone();
             let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.looping(), want, "{reply:?}");
@@ -697,7 +814,11 @@ mod tests {
         // `af toggle` is add-if-absent / drop-if-present, so no flag to keep in sync
         assert_eq!(
             *cmds.lock().unwrap(),
-            [json!(["af", "toggle", "lavfi=[pan=stereo|c0=0.5*c0+0.5*c1|c1=0*c0]"])]
+            [json!([
+                "af",
+                "toggle",
+                "lavfi=[pan=stereo|c0=0.5*c0+0.5*c1|c1=0*c0]"
+            ])]
         );
     }
 
@@ -707,8 +828,15 @@ mod tests {
         p.volume(-5);
         p.volume(5);
         // relative `add`, so mpv owns the clamping against --volume-max
-        assert_eq!(*cmds.lock().unwrap(), [json!(["add", "volume", -5]), json!(["add", "volume", 5])]);
-        for (reply, want) in [(Some(json!(100.0)), 100), (Some(json!(85.0)), 85), (None, 100)] {
+        assert_eq!(
+            *cmds.lock().unwrap(),
+            [json!(["add", "volume", -5]), json!(["add", "volume", 5])]
+        );
+        for (reply, want) in [
+            (Some(json!(100.0)), 100),
+            (Some(json!(85.0)), 85),
+            (None, 100),
+        ] {
             let r = reply.clone();
             let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.volume_pct(), want, "{reply:?}");
@@ -724,7 +852,14 @@ mod tests {
         }
         let af = &LEFT_EAR_AF["lavfi=[".len()..LEFT_EAR_AF.len() - 1];
         let r = Command::new("ffmpeg")
-            .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo"])
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=stereo",
+            ])
             .args(["-af", af, "-t", "0.1", "-f", "null", "-"])
             .output()
             .unwrap();
@@ -735,8 +870,12 @@ mod tests {
     /// pan filter is on; Ipc::cmd answers None on any failure.
     #[test]
     fn test_left_ear_reads_filter_chain() {
-        for (reply, want) in [(Some(json!([])), false), (Some(json!([{"name": "pan"}])), true), (None, false),
-            (Some(json!([{"name": "lavfi", "label": "msmviz"}])), false)] {
+        for (reply, want) in [
+            (Some(json!([])), false),
+            (Some(json!([{"name": "pan"}])), true),
+            (None, false),
+            (Some(json!([{"name": "lavfi", "label": "msmviz"}])), false),
+        ] {
             let r = reply.clone();
             let (p, _c) = player(move |_| r.clone());
             assert_eq!(p.left_ear(), want, "{reply:?}");
@@ -825,8 +964,12 @@ mod tests {
             ..Default::default()
         };
 
-        let pl = Player::spawn(Arc::new(Yt::anon()), "/tmp/ymc-check.sock", "/tmp/ymc-check.log")
-            .unwrap();
+        let pl = Player::spawn(
+            Arc::new(Yt::anon()),
+            "/tmp/ymc-check.sock",
+            "/tmp/ymc-check.log",
+        )
+        .unwrap();
         pl.play(&[tr], 0);
         let mut ok = false;
         for _ in 0..30 {
