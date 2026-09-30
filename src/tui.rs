@@ -1089,13 +1089,17 @@ impl State {
                         let q = self.query.trim().to_string();
                         if !q.is_empty() {
                             self.results = env.search_all(&q);
+                            if self.results.is_empty() {
+                                (self.flash, self.flash_ttl) =
+                                    ("search failed (offline?)".into(), 8);
+                            }
                             (self.sel_s, self.focus) = (0, 1);
                         }
                     }
                     Backspace => {
                         self.query.pop();
                     }
-                    Char(ch @ ' '..='~') => self.query.push(ch),
+                    Char(ch) if !ch.is_control() => self.query.push(ch),
                     _ => {}
                 }
             } else {
@@ -1105,10 +1109,14 @@ impl State {
                     Char('j') | Down => self.sel_s = clamp(self.sel_s + 1, 0, n - 1),
                     Char('h') => self.focus = 0,
                     Enter | Char('f' | 'a' | 'A') if n > 0 => {
-                        let Ok((title, tracks, thumb)) =
-                            env.resolve_result(&self.results[self.sel_s as usize])
-                        else {
-                            return true;
+                        let (title, tracks, thumb) = match env
+                            .resolve_result(&self.results[self.sel_s as usize])
+                        {
+                            Ok(r) => r,
+                            Err(e) => {
+                                (self.flash, self.flash_ttl) = (format!("couldn't load: {e}"), 8);
+                                return true;
+                            }
                         };
                         if tracks.is_empty() {
                             return true;
@@ -1408,6 +1416,12 @@ impl Drop for TermGuard<'_> {
     }
 }
 
+static STOP: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_term(_: libc::c_int) {
+    STOP.store(true, Ordering::Relaxed);
+}
+
 /// Own the terminal until `q`. Restores the terminal on return AND on panic.
 pub fn run(yt: Arc<Yt>, player: &Player) {
     let ui = std::thread::current().id();
@@ -1425,6 +1439,14 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
     // SAFETY: called before any other thread reads the locale.
     unsafe {
         libc::setlocale(libc::LC_CTYPE, c"".as_ptr());
+    }
+    // SIGTERM/SIGHUP/SIGQUIT just set a flag so the loop returns and the
+    // TermGuard + player.quit() teardown runs (else mpv is orphaned).
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        for sig in [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT] {
+            libc::signal(sig, on_term as *const () as libc::sighandler_t);
+        }
     }
     let mut out = io::stdout();
     if terminal::enable_raw_mode().is_err() {
@@ -1449,7 +1471,11 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
         } else {
             500
         };
-        if !event::poll(Duration::from_millis(tick)).unwrap_or(false) {
+        let ready = event::poll(Duration::from_millis(tick)).unwrap_or(false);
+        if STOP.load(Ordering::Relaxed) {
+            return;
+        }
+        if !ready {
             continue;
         }
         let Ok(Event::Key(k)) = event::read() else {
@@ -1535,6 +1561,17 @@ mod tests {
         fn viz_meta(&self) -> Option<serde_json::Value> {
             None
         }
+    }
+
+    #[test]
+    fn search_accepts_non_ascii() {
+        let env = Fake::default();
+        let mut st = State::new(&env);
+        st.screen = Screen::Search;
+        for ch in ['B', 'e', 'y', 'o', 'n', 'c', 'é'] {
+            st.handle_key(&env, Key::Char(ch));
+        }
+        assert_eq!(st.query, "Beyoncé");
     }
 
     /// Drive the loop like _Scr: one frame per repaint, then one key; keys
