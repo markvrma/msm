@@ -337,7 +337,7 @@ fn box_resize(px: &[u8], w: usize, h: usize, ow: usize, oh: usize) -> Vec<u8> {
 /// Image.blend(img.convert("L").convert("RGB"), img, 1.35): the extrapolating
 /// branch of Blend.c, float math, truncate, clip.
 fn enhance_color(img: &mut [u8]) {
-    for p in img.chunks_exact_mut(3) {
+    for p in img.as_chunks_mut::<3>().0 {
         // Convert.c rgb2l: L24 fixed point
         let l = ((p[0] as u32 * 19595 + p[1] as u32 * 38470 + p[2] as u32 * 7471 + 0x8000) >> 16)
             as i32;
@@ -493,7 +493,7 @@ const COARSE: [u32; 3] = [2, 2, 2];
 /// quantize_octree: (palette of n colors, palette index per pixel).
 fn quantize_octree(img: &[u8], n: u32) -> (Vec<[u8; 3]>, Vec<usize>) {
     let n = n as usize;
-    let pixels: Vec<[u8; 3]> = img.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+    let pixels: Vec<[u8; 3]> = img.as_chunks::<3>().0.to_vec();
     let mut fine = Cube::new(FINE);
     for &p in &pixels {
         let off = fine.offset(p);
