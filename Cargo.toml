@@ -5,6 +5,13 @@ edition = "2021"
 description = "Terminal player for YouTube Music + local library, with cmusfm scrobbling and pixelated album art"
 license = "MIT"
 authors = ["Mark Verma"]
+repository = "https://github.com/markvrma/yt-music-cli"
+homepage = "https://github.com/markvrma/yt-music-cli"
+readme = "README.md"
+keywords = ["tui", "music", "youtube-music", "mpv", "terminal"]
+categories = ["command-line-utilities", "multimedia::audio"]
+rust-version = "1.88"
+include = ["src/**/*", "tests/**/*", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE"]
 
 [dependencies]
 crossterm = "0.29"
