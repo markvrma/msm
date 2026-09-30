@@ -43,7 +43,8 @@ pub fn art_file(title: &str, url: &str) -> Option<PathBuf> {
     if s.is_empty() {
         s = "art".into();
     }
-    let path = cache.join(s + ".jpg");
+    // slug alone collides (same title, non-Latin titles all -> "_"): key on the url too
+    let path = cache.join(format!("{s}_{}.jpg", key12(url)));
     if path.exists() {
         return Some(path);
     }
@@ -55,8 +56,21 @@ pub fn art_file(title: &str, url: &str) -> Option<PathBuf> {
         .call()
         .ok()?;
     let bytes = resp.body_mut().read_to_vec().ok()?;
-    std::fs::write(&path, bytes).ok()?;
+    // captive-portal HTML / empty bodies must not be cached as art
+    let magic = bytes.starts_with(&[0xFF, 0xD8])
+        || bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47])
+        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"));
+    if !magic {
+        return None;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, bytes).ok()?;
+    std::fs::rename(&tmp, &path).ok()?;
     Some(path)
+}
+
+fn key12(s: &str) -> String {
+    sha1_smol::Sha1::from(s).digest().to_string()[..12].to_owned()
 }
 
 /// Immediate subdirs of ~/Music containing audio = albums (lazy, no tags).
@@ -107,7 +121,7 @@ fn scan_dir(root: &Path) -> Vec<Album> {
 
 /// subprocess.run(..., timeout=secs): stdout captured, killed on timeout.
 /// None on spawn failure / timeout. stdin is nulled so ffmpeg can't eat TUI keys.
-fn run_timeout(cmd: &mut Command, secs: u64) -> Option<(bool, Vec<u8>)> {
+pub(crate) fn run_timeout(cmd: &mut Command, secs: u64) -> Option<(bool, Vec<u8>)> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -223,7 +237,11 @@ pub fn local_art(dir: &Path, first_file: &Path) -> Option<PathBuf> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let out = cache.join(format!("local_{}.jpg", truncated(slug(&base), 50)));
+    let out = cache.join(format!(
+        "local_{}_{}.jpg",
+        truncated(slug(&base), 50),
+        key12(&dir.to_string_lossy())
+    ));
     if out.exists() {
         return Some(out);
     }
@@ -319,7 +337,11 @@ pub fn record(title: &str, tracks: &[Track], thumb: &str) -> Vec<Album> {
         let _ = std::fs::create_dir_all(d);
     }
     if let Ok(s) = to_python_json(&h) {
-        let _ = std::fs::write(&p, s);
+        // tmp + rename: a crash mid-write must not leave invalid JSON (load -> [] -> history lost)
+        let tmp = p.with_extension("json.tmp");
+        if std::fs::write(&tmp, s).is_ok() {
+            let _ = std::fs::rename(&tmp, &p);
+        }
     }
     h
 }
@@ -533,7 +555,10 @@ mod tests {
             let f = d.join("01.mp3");
             touch(&f); // not real audio: ffmpeg fails -> None
             assert_eq!(local_art(&d, &f), None);
-            let cached = art_cache().join("local_Some_Album_2020_.jpg");
+            let cached = art_cache().join(format!(
+                "local_Some_Album_2020__{}.jpg",
+                key12(&d.to_string_lossy())
+            ));
             touch(&cached);
             assert_eq!(local_art(&d, &f), Some(cached));
         });
