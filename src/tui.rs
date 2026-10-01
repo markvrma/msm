@@ -11,8 +11,14 @@
 //!       enter plays that one track, f plays the album from there, a/A queue);
 //!       Esc — or anything that leaves the pane, h/l or '/' — puts the album
 //!       list back.
-//! Keys: h/l switch pane, j/k move, space pause, n/p next/prev, a queue,
-//!       A play-next, r repeat-all, e left-ear, [ ] volume, L like,
+//! FAVOURITES pane (bottom half of the LOCAL column): every track liked with
+//!       L, newest first, kept in config_dir()/favourites.json. enter plays
+//!       the highlighted song alone; f replaces the playlist with every
+//!       favourite, in like order (oldest first); a/A queue that one song.
+//! Keys: h/l switch pane (NOW, LOCAL, FAVOURITES, FOR YOU), j/k move, space
+//!       pause, n/p next/prev, a queue, A play-next, r repeat-all, e left-ear,
+//!       [ ] volume, L toggle favourite on the highlighted (FAVOURITES/NOW) or
+//!       playing track, also a YouTube thumbs-up for YT tracks,
 //!       v full-screen visualizer (browse keys keep working), V cycle the
 //!       visualizer pattern (circle, squiggle, star, square), q quit.
 //!       Queue (a) = play after the whole queue; play-next (A) = play right
@@ -25,6 +31,7 @@
 //! written out whole (see `render`), so the draw path is testable without a
 //! terminal.
 
+use crate::local::Fav;
 use crate::player::Player;
 use crate::visualizer::Visualizer;
 use crate::ytm::Yt;
@@ -464,6 +471,9 @@ trait Env {
     fn resolve_result(&self, r: &Item) -> Result<(String, Vec<Track>, String), String>;
     fn like_track(&self, t: &Track) -> bool;
     fn load_history(&self) -> Vec<Album>;
+    fn load_favs(&self) -> Vec<Fav>;
+    /// Add or remove `t` (by url) in favourites.json. -> (list after, added?)
+    fn toggle_fav(&self, t: &Track) -> (Vec<Fav>, bool);
     fn scan_local(&self) -> Vec<Album>;
     fn record(&self, title: &str, tracks: &[Track], thumb: &str) -> Vec<Album>;
     fn load_local_album(&self, album: &mut Album);
@@ -509,6 +519,12 @@ impl Env for Real<'_> {
     }
     fn load_history(&self) -> Vec<Album> {
         crate::local::load_history()
+    }
+    fn load_favs(&self) -> Vec<Fav> {
+        crate::local::load_favs()
+    }
+    fn toggle_fav(&self, t: &Track) -> (Vec<Fav>, bool) {
+        crate::local::toggle_fav(t)
     }
     fn scan_local(&self) -> Vec<Album> {
         crate::local::scan_local()
@@ -676,10 +692,11 @@ struct State {
     authed: bool,
     hist: Vec<Album>,
     local: Vec<Album>,
+    favs: Vec<Fav>,               // like order, oldest first; drawn newest first
     recs: Arc<Mutex<Vec<Album>>>, // authed: YT Music recs, filled off-thread after first paint
     screen: Screen,
-    focus: usize,  // 0=NowPlaying 1=Local 2=pane2  (search: 0=bar 1=results)
-    sel: [i64; 3], // per-pane selection
+    focus: usize, // 0=NowPlaying 1=Local 2=Favourites 3=pane2  (search: 0=bar 1=results)
+    sel: [i64; 4], // per-pane selection; sel[2] indexes the newest-first view
     sel_s: i64,
     query: String,
     results: Vec<Item>,
@@ -704,10 +721,11 @@ impl State {
             authed,
             hist: env.load_history(),
             local: env.scan_local(),
+            favs: env.load_favs(),
             recs: recs.clone(),
             screen: Screen::Browse,
             focus: 0,
-            sel: [0; 3],
+            sel: [0; 4],
             sel_s: 0,
             query: String::new(),
             results: Vec::new(),
@@ -761,6 +779,7 @@ impl State {
                 .and_then(|a| a.tracks.as_ref())
                 .map_or(0, Vec::len),
             1 => self.local.len(),
+            2 => self.favs.len(),
             _ => self.pane2_len(),
         }) as i64
     }
@@ -876,14 +895,48 @@ impl State {
         self.flash_ttl = 6;
     }
 
-    /// Album selected in the focused list pane (1=LOCAL, 2=FOR YOU/hist),
-    /// or None. Pane 0 (NOW) has no separate album to open.
+    /// Album selected in the focused list pane (1=LOCAL, 3=FOR YOU/hist),
+    /// or None. Pane 0 (NOW) has no separate album to open; FAVOURITES
+    /// builds one (see `fav_album`).
     fn cur_album(&self) -> Option<Src> {
         match self.focus {
             1 if !self.local.is_empty() => Some(Src::Local(self.sel[1] as usize)),
-            2 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[2] as usize)),
+            2 => self.fav_album(true).map(|a| Src::Temp(Box::new(a))),
+            3 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[3] as usize)),
             _ => None,
         }
+    }
+
+    /// Index into `favs` (oldest first) of the highlighted FAVOURITES row.
+    fn fav_idx(&self) -> Option<usize> {
+        (self.favs.len() as i64 - 1 - self.sel[2])
+            .try_into()
+            .ok()
+            .filter(|&i| i < self.favs.len())
+    }
+
+    /// Favourites as a playable album: the highlighted song alone, or
+    /// (`all`) the whole list.
+    // ponytail: shown newest-first but `all` plays in like order (oldest ->
+    // newest), so playback replays the order you found them.
+    fn fav_album(&self, all: bool) -> Option<Album> {
+        let i = self.fav_idx()?;
+        let favs = if all {
+            &self.favs[..]
+        } else {
+            &self.favs[i..=i]
+        };
+        let tracks: Vec<Track> = favs.iter().map(|f| f.track.clone()).collect();
+        Some(Album {
+            title: if all {
+                "FAVOURITES".into()
+            } else {
+                tracks[0].title.clone()
+            },
+            thumb: tracks[0].thumb.clone(),
+            tracks: Some(tracks),
+            ..Default::default()
+        })
     }
 
     /// Cover for the currently-playing track (follows it across queued
@@ -915,7 +968,7 @@ impl State {
         // hidden = frozen, so a focused FOR YOU list or the search screen
         // costs no extra IPC and falls back to the idle refresh rate
         let full = self.full && self.screen == Screen::Browse;
-        let hidden = full || self.screen != Screen::Browse || self.focus == 2 || lay.rcw == 0;
+        let hidden = full || self.screen != Screen::Browse || self.focus == 3 || lay.rcw == 0;
         let meta = if hidden && !full {
             None
         } else {
@@ -956,6 +1009,8 @@ impl State {
                 draw_rows(&mut buf, wl, &rows, self.sel[0], self.focus == 0);
             }
 
+            // LOCAL column: top half LOCAL, bottom half FAVOURITES
+            let loc_h = main_h.div_euclid(2);
             if let Some(d) = self.drill {
                 let al = &self.local[d];
                 let title = format!("{}  (esc=back enter=play a=queue)", al.title);
@@ -963,7 +1018,7 @@ impl State {
                     &mut buf,
                     0,
                     lay.npw,
-                    main_h,
+                    loc_h,
                     lay.lmw,
                     &title,
                     self.focus == 1,
@@ -980,13 +1035,33 @@ impl State {
                 &mut buf,
                 0,
                 lay.npw,
-                main_h,
+                loc_h,
                 lay.lmw,
                 "LOCAL ~/Music  (enter=open f=play)",
                 self.focus == 1,
             ) {
                 let rows: Vec<String> = self.local.iter().map(|a| a.title.clone()).collect();
                 draw_rows(&mut buf, wm, &rows, self.sel[1], self.focus == 1);
+            }
+            if let Some(wf) = draw_box(
+                &mut buf,
+                loc_h,
+                lay.npw,
+                main_h - loc_h,
+                lay.lmw,
+                "FAVOURITES  (enter=play f=play all)",
+                self.focus == 2,
+            ) {
+                let rows: Vec<String> = self
+                    .favs
+                    .iter()
+                    .rev()
+                    .map(|f| match f.track.artist.as_str() {
+                        "" => f.track.title.clone(),
+                        a => format!("{} — {a}", f.track.title),
+                    })
+                    .collect();
+                draw_rows(&mut buf, wf, &rows, self.sel[2], self.focus == 2);
             }
 
             if lay.rcw != 0 {
@@ -1003,7 +1078,7 @@ impl State {
                     lay.last5_h,
                     lay.rcw,
                     title2,
-                    self.focus == 2,
+                    self.focus == 3,
                 ) {
                     if self.viz.live() {
                         // same size as draw_art below -> art_grid cache hit
@@ -1022,7 +1097,7 @@ impl State {
                         if rows2.is_empty() && self.authed {
                             rows2.push("loading…".into());
                         }
-                        draw_rows(&mut buf, w5, &rows2, self.sel[2], self.focus == 2);
+                        draw_rows(&mut buf, w5, &rows2, self.sel[3], self.focus == 3);
                     }
                 }
                 if let Some(wa) = draw_box(
@@ -1231,7 +1306,7 @@ impl State {
                 self.vfull.set_pattern(p);
             }
             Char('h') => self.focus = self.focus.saturating_sub(1),
-            Char('l') => self.focus = (self.focus + 1).min(2),
+            Char('l') => self.focus = (self.focus + 1).min(3),
             Char('j') | Down => {
                 let n = self.pane_len(self.focus);
                 self.sel[self.focus] = clamp(self.sel[self.focus] + 1, 0, n - 1);
@@ -1248,6 +1323,12 @@ impl State {
                         if let Some((_, true)) = self.ensure(env, &Src::Local(i)) {
                             (self.drill, self.dsel) = (Some(i), 0);
                         }
+                    }
+                } else if self.focus == 2 {
+                    // enter = this song alone; f (below) = the whole list
+                    if let Some(a) = self.fav_album(false) {
+                        self.do_play(env, Src::Temp(Box::new(a)), 0);
+                        (self.focus, self.sel[0]) = (0, 0);
                     }
                 } else if let Some(src) = self.cur_album() {
                     // rec items resolve here; hist items no-op
@@ -1284,6 +1365,11 @@ impl State {
                         };
                         self.add_tracks(env, vec![t.clone()], &t.title, &thumb, next);
                     }
+                } else if self.focus == 2 {
+                    if let Some(i) = self.fav_idx() {
+                        let t = self.favs[i].track.clone();
+                        self.add_tracks(env, vec![t.clone()], &t.title, &t.thumb, next);
+                    }
                 } else if let Some(src) = self.cur_album() {
                     match self.ensure(env, &src) {
                         Some((a, true)) => self.add_tracks(
@@ -1301,18 +1387,32 @@ impl State {
                 }
             }
             Char('L') => {
-                // shift+l: thumbs-up the highlighted (or playing) track
+                // shift+l: toggle the highlighted (or playing) track in
+                // favourites; adding a YT track also thumbs it up on YouTube
                 let track = match (self.focus, self.now_tracks()) {
                     (0, Some(t)) => t.get(self.sel[0] as usize).cloned(),
+                    (2, _) => self.fav_idx().map(|i| self.favs[i].track.clone()),
                     _ => env.current(),
                 };
-                (self.flash, self.flash_ttl) = match track {
-                    None => ("nothing to like".into(), 6),
-                    Some(t) if env.like_track(&t) => (format!("♥ liked: {}", t.title), 6),
-                    Some(_) => (
-                        "♥ like failed — run `msm auth` (session expired?)".into(),
+                let Some(t) = track else {
+                    (self.flash, self.flash_ttl) = ("nothing to like".into(), 6);
+                    return true;
+                };
+                let added;
+                (self.favs, added) = env.toggle_fav(&t);
+                self.sel[2] = clamp(self.sel[2], 0, self.favs.len() as i64 - 1);
+                (self.flash, self.flash_ttl) = if !added {
+                    (format!("♡ removed from favourites: {}", t.title), 6)
+                } else if t.url.starts_with("http") && !env.like_track(&t) {
+                    (
+                        format!(
+                            "♥ added to favourites: {} (YT like failed — `msm auth`?)",
+                            t.title
+                        ),
                         8,
-                    ),
+                    )
+                } else {
+                    (format!("♥ added to favourites: {}", t.title), 6)
                 };
             }
             _ => {}
@@ -1509,6 +1609,8 @@ mod tests {
     struct Fake {
         local: Vec<Album>,
         played: RefCell<Vec<(usize, usize)>>,
+        last_play: RefCell<Vec<Track>>,
+        favs: RefCell<Vec<Fav>>,
     }
 
     impl Env for Fake {
@@ -1527,6 +1629,15 @@ mod tests {
         }
         fn load_history(&self) -> Vec<Album> {
             vec![]
+        }
+        fn load_favs(&self) -> Vec<Fav> {
+            self.favs.borrow().clone()
+        }
+        fn toggle_fav(&self, t: &Track) -> (Vec<Fav>, bool) {
+            let mut f = self.favs.borrow_mut();
+            let n = f.len() as u64; // fake clock: later like = bigger stamp
+            let added = crate::local::toggle_in(&mut f, t, n);
+            (f.clone(), added)
         }
         fn scan_local(&self) -> Vec<Album> {
             self.local.clone()
@@ -1554,6 +1665,7 @@ mod tests {
         }
         fn play(&self, tracks: &[Track], start: usize) {
             self.played.borrow_mut().push((tracks.len(), start));
+            *self.last_play.borrow_mut() = tracks.to_vec();
         }
         fn enqueue(&self, _: &[Track]) {}
         fn play_next(&self, _: &[Track]) -> Option<usize> {
@@ -1648,6 +1760,60 @@ mod tests {
         assert!(frames[4].contains("LOCAL ~/Music"), "{}", frames[4]); // Esc -> album list back
                                                                        // enter = the highlighted track alone; f = the whole album from there
         assert_eq!(*env.played.borrow(), vec![(1, 0), (3, 1)]);
+    }
+
+    #[test]
+    fn favourites_list_newest_first_and_play_in_like_order() {
+        utf8_locale();
+        use Key::*;
+        let env = Fake {
+            local: vec![album_x()],
+            ..Default::default()
+        };
+        // play Album X (NOW focused), like T0 then T1, go to FAVOURITES,
+        // select the older one (T0, second row), enter = T0 alone
+        let keys = [
+            Char('l'),
+            Char('f'),
+            Char('L'),
+            Char('j'),
+            Char('L'),
+            Char('l'),
+            Char('l'),
+            Char('j'),
+            Enter,
+        ];
+        let frames = drive(&env, &keys, 40, 120);
+        // FAVOURITES focused, both liked: T1 (newer) above T0. NOW sits above
+        // the pane's top edge, so only favourite rows follow its title.
+        let f = &frames[7];
+        let favs = &f[f.find("FAVOURITES").expect(f)..];
+        assert!(favs.find("T1").unwrap() < favs.find("T0").unwrap(), "{f}");
+        let urls: Vec<_> = env
+            .last_play
+            .borrow()
+            .iter()
+            .map(|t| t.url.clone())
+            .collect();
+        assert_eq!(urls, ["u0"]);
+        // f on any row = every favourite, older first, then the newer
+        drive(&env, &[Char('l'), Char('l'), Char('f')], 40, 120);
+        let urls: Vec<_> = env
+            .last_play
+            .borrow()
+            .iter()
+            .map(|t| t.url.clone())
+            .collect();
+        assert_eq!(urls, ["u0", "u1"]);
+        assert_eq!(env.played.borrow().last(), Some(&(2, 0)));
+        // L on a favourite removes it
+        let frames = drive(&env, &[Char('l'), Char('l'), Char('L')], 40, 120);
+        assert!(
+            frames[3].contains("♡ removed from favourites: T1"),
+            "{}",
+            frames[3]
+        );
+        assert_eq!(env.favs.borrow().len(), 1);
     }
 
     #[test]
