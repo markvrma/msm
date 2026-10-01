@@ -115,11 +115,13 @@ fn de_secs<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     Ok(v.as_f64().map(|f| f as u64).unwrap_or(0))
 }
 
-/// Local album folder: ~/Music/<name>/ with its audio files (sorted).
+/// Local album folder: ~/Music/<name>/ with its audio files (sorted) and the
+/// artist read from the first file's tags at scan time.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalDir {
     pub dir: PathBuf,
     pub files: Vec<String>,
+    pub artist: String,
 }
 
 /// An album-like list: a history entry, a local folder, a YT rec, or an
