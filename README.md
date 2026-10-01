@@ -187,6 +187,7 @@ These flags appear in front of the label while a mode is on:
 | `[` / `]` | volume −5 / +5. This is msm's own mpv volume; the system mixer and other apps are untouched. |
 | `L` | like the highlighted track, or the playing track (needs sign-in) |
 | `v` | full-screen visualizer, above the progress bar. The other browse keys keep working; `v` again goes back. |
+| `V` | cycle the visualizer pattern: circle, squiggly circle, star, square (pane and full screen together) |
 | `/` | search |
 | `Ctrl-Z` | suspend msm and mpv (music stops). Resume with `fg`. |
 | `q`, `Ctrl-C` | quit |

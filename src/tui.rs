@@ -13,7 +13,8 @@
 //!       list back.
 //! Keys: h/l switch pane, j/k move, space pause, n/p next/prev, a queue,
 //!       A play-next, r repeat-all, e left-ear, [ ] volume, L like,
-//!       v full-screen visualizer (browse keys keep working), q quit.
+//!       v full-screen visualizer (browse keys keep working), V cycle the
+//!       visualizer pattern (circle, squiggle, star, square), q quit.
 //!       Queue (a) = play after the whole queue; play-next (A) = play right
 //!       after the current track, queue untouched. Repeat-all (r, browse screen
 //!       only) restarts at track 1 after the last one; while it is on n/p wrap
@@ -1223,6 +1224,12 @@ impl State {
             Char('[') => env.volume(-5),    // msm's own volume, not the system's
             Char(']') => env.volume(5),
             Char('v') => self.full = !self.full, // full-screen visualizer
+            Char('V') => {
+                // pane and full screen share one pattern
+                let p = self.viz.pattern().next();
+                self.viz.set_pattern(p);
+                self.vfull.set_pattern(p);
+            }
             Char('h') => self.focus = self.focus.saturating_sub(1),
             Char('l') => self.focus = (self.focus + 1).min(2),
             Char('j') | Down => {
@@ -1734,6 +1741,16 @@ mod tests {
         assert!(frames[1].contains("0:00 / 0:00"), "{}", frames[1]);
         assert!(!frames[2].contains("LOCAL ~/Music"), "{}", frames[2]);
         assert!(frames[3].contains("LOCAL ~/Music"), "{}", frames[3]);
+    }
+
+    #[test]
+    fn shift_v_cycles_the_pattern_for_both_visualizers() {
+        use crate::visualizer::Pattern;
+        let env = Fake::default();
+        let mut st = State::new(&env);
+        assert!(st.handle_key(&env, Key::Char('V')));
+        assert_eq!(st.viz.pattern(), Pattern::Squiggle);
+        assert_eq!(st.vfull.pattern(), Pattern::Squiggle);
     }
 
     #[test]
