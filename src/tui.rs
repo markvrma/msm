@@ -20,7 +20,8 @@
 //!       [ ] volume, L toggle favourite on the highlighted (FAVOURITES/NOW) or
 //!       playing track, also a YouTube thumbs-up for YT tracks,
 //!       v full-screen visualizer (browse keys keep working), V cycle the
-//!       visualizer pattern (circle, squiggle, star, square), q quit.
+//!       visualizer pattern (circle, squiggle, star, square), C auto-cycle it
+//!       every second (C again stops), q quit.
 //!       Queue (a) = play after the whole queue; play-next (A) = play right
 //!       after the current track, queue untouched. Repeat-all (r, browse screen
 //!       only) restarts at track 1 after the last one; while it is on n/p wrap
@@ -712,10 +713,18 @@ struct State {
     viz: Visualizer,        // replaces the FOR YOU list while music plays
     full: bool,             // v: browse screen given over to vfull
     vfull: Visualizer,
+    auto_pat: Option<Instant>, // C: auto-cycling the pattern; time of the last switch
     art_memo: (Option<String>, Option<PathBuf>), // (url, path): cover art of the playing track
 }
 
 impl State {
+    /// Pane and full screen share one pattern.
+    fn next_pattern(&mut self) {
+        let p = self.viz.pattern().next();
+        self.viz.set_pattern(p);
+        self.vfull.set_pattern(p);
+    }
+
     fn new(env: &dyn Env) -> State {
         let authed = env.authed();
         let recs = Arc::new(Mutex::new(Vec::new()));
@@ -743,6 +752,7 @@ impl State {
             viz: Visualizer::new(false),
             full: false,
             vfull: Visualizer::new(true),
+            auto_pat: None,
             art_memo: (None, None),
         };
         if authed {
@@ -995,6 +1005,13 @@ impl State {
     // them happened to change, which read as permanent blackout. Narrow to
     // "on demand" if the redraw traffic ever matters over ssh.
     fn draw(&mut self, env: &dyn Env, h: i64, w: i64) -> Buf {
+        if self
+            .auto_pat
+            .is_some_and(|t| t.elapsed() >= Duration::from_secs(1))
+        {
+            self.next_pattern();
+            self.auto_pat = Some(Instant::now());
+        }
         let mut buf = Buf::new(h, w);
         let lay = layout(h, w);
         let main_h = lay.main_h;
@@ -1392,11 +1409,10 @@ impl State {
             Char('[') => env.volume(-5),    // msm's own volume, not the system's
             Char(']') => env.volume(5),
             Char('v') => self.full = !self.full, // full-screen visualizer
-            Char('V') => {
-                // pane and full screen share one pattern
-                let p = self.viz.pattern().next();
-                self.viz.set_pattern(p);
-                self.vfull.set_pattern(p);
+            Char('V') => self.next_pattern(),
+            Char('C') => {
+                // toggle: cycle the pattern every second, or stop where it is
+                self.auto_pat = self.auto_pat.is_none().then(Instant::now);
             }
             Char('h') => self.focus = self.focus.saturating_sub(1),
             Char('l') => self.focus = (self.focus + 1).min(3),
@@ -1664,7 +1680,7 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
         // 500ms timeout: refresh progress even with no keypress; ~30fps while
         // the visualizer animates. Resize and other events just fall through
         // to the next repaint.
-        let tick = if st.viz.live() || st.vfull.live() {
+        let tick = if st.viz.live() || st.vfull.live() || st.auto_pat.is_some() {
             33
         } else {
             500
@@ -2060,6 +2076,19 @@ mod tests {
         assert!(st.handle_key(&env, Key::Char('V')));
         assert_eq!(st.viz.pattern(), Pattern::Squiggle);
         assert_eq!(st.vfull.pattern(), Pattern::Squiggle);
+    }
+
+    #[test]
+    fn shift_c_toggles_auto_cycle() {
+        let env = Fake::default();
+        let mut st = State::new(&env);
+        assert!(st.handle_key(&env, Key::Char('C')));
+        assert!(st.auto_pat.is_some());
+        st.auto_pat = Some(Instant::now() - Duration::from_secs(2));
+        st.draw(&env, 24, 80);
+        assert_eq!(st.viz.pattern(), crate::visualizer::Pattern::Squiggle);
+        assert!(st.handle_key(&env, Key::Char('C')));
+        assert!(st.auto_pat.is_none());
     }
 
     #[test]

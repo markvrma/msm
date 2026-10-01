@@ -195,6 +195,7 @@ These flags appear in front of the label while a mode is on:
 | `L` | add the highlighted track (NOW / FAVOURITES), or the playing one, to FAVOURITES; again removes it. YouTube tracks also get a thumbs-up when signed in. |
 | `v` | full-screen visualizer, above the progress bar. The other browse keys keep working; `v` again goes back. |
 | `V` | cycle the visualizer pattern: circle, squiggly circle, star, square (pane and full screen together) |
+| `C` | auto-cycle the visualizer pattern every second; `C` again stops on the current one |
 | `/` | search |
 | `Ctrl-Z` | suspend msm and mpv (music stops). Resume with `fg`. |
 | `q`, `Ctrl-C` | quit |
