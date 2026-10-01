@@ -12,9 +12,9 @@
 //!       Esc — or anything that leaves the pane, h/l or '/' — puts the album
 //!       list back.
 //! FAVOURITES pane (bottom half of the LOCAL column): every track liked with
-//!       L, newest first, kept in config_dir()/favourites.json. enter (or f)
-//!       plays from the highlighted song through everything liked after it,
-//!       in like order; a/A queue that one song.
+//!       L, newest first, kept in config_dir()/favourites.json. enter plays
+//!       the highlighted song alone; f replaces the playlist with every
+//!       favourite, in like order (oldest first); a/A queue that one song.
 //! Keys: h/l switch pane (NOW, LOCAL, FAVOURITES, FOR YOU), j/k move, space
 //!       pause, n/p next/prev, a queue, A play-next, r repeat-all, e left-ear,
 //!       [ ] volume, L toggle favourite on the highlighted (FAVOURITES/NOW) or
@@ -901,7 +901,7 @@ impl State {
     fn cur_album(&self) -> Option<Src> {
         match self.focus {
             1 if !self.local.is_empty() => Some(Src::Local(self.sel[1] as usize)),
-            2 => self.fav_album().map(|a| Src::Temp(Box::new(a))),
+            2 => self.fav_album(true).map(|a| Src::Temp(Box::new(a))),
             3 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[3] as usize)),
             _ => None,
         }
@@ -915,16 +915,24 @@ impl State {
             .filter(|&i| i < self.favs.len())
     }
 
-    /// The highlighted favourite and every song liked after it.
-    // ponytail: shown newest-first but plays in like order (oldest -> newest)
-    // from the highlighted song, so playback replays the order you found them.
-    fn fav_album(&self) -> Option<Album> {
-        let tracks: Vec<Track> = self.favs[self.fav_idx()?..]
-            .iter()
-            .map(|f| f.track.clone())
-            .collect();
+    /// Favourites as a playable album: the highlighted song alone, or
+    /// (`all`) the whole list.
+    // ponytail: shown newest-first but `all` plays in like order (oldest ->
+    // newest), so playback replays the order you found them.
+    fn fav_album(&self, all: bool) -> Option<Album> {
+        let i = self.fav_idx()?;
+        let favs = if all {
+            &self.favs[..]
+        } else {
+            &self.favs[i..=i]
+        };
+        let tracks: Vec<Track> = favs.iter().map(|f| f.track.clone()).collect();
         Some(Album {
-            title: "FAVOURITES".into(),
+            title: if all {
+                "FAVOURITES".into()
+            } else {
+                tracks[0].title.clone()
+            },
             thumb: tracks[0].thumb.clone(),
             tracks: Some(tracks),
             ..Default::default()
@@ -1041,7 +1049,7 @@ impl State {
                 lay.npw,
                 main_h - loc_h,
                 lay.lmw,
-                "FAVOURITES  (enter=play L=remove)",
+                "FAVOURITES  (enter=play f=play all)",
                 self.focus == 2,
             ) {
                 let rows: Vec<String> = self
@@ -1317,8 +1325,9 @@ impl State {
                         }
                     }
                 } else if self.focus == 2 {
-                    if let Some(src) = self.cur_album() {
-                        self.do_play(env, src, 0);
+                    // enter = this song alone; f (below) = the whole list
+                    if let Some(a) = self.fav_album(false) {
+                        self.do_play(env, Src::Temp(Box::new(a)), 0);
                         (self.focus, self.sel[0]) = (0, 0);
                     }
                 } else if let Some(src) = self.cur_album() {
@@ -1762,7 +1771,7 @@ mod tests {
             ..Default::default()
         };
         // play Album X (NOW focused), like T0 then T1, go to FAVOURITES,
-        // select the older one (T0, second row), enter
+        // select the older one (T0, second row), enter = T0 alone
         let keys = [
             Char('l'),
             Char('f'),
@@ -1786,7 +1795,16 @@ mod tests {
             .iter()
             .map(|t| t.url.clone())
             .collect();
-        assert_eq!(urls, ["u0", "u1"]); // older first, then the newer
+        assert_eq!(urls, ["u0"]);
+        // f on any row = every favourite, older first, then the newer
+        drive(&env, &[Char('l'), Char('l'), Char('f')], 40, 120);
+        let urls: Vec<_> = env
+            .last_play
+            .borrow()
+            .iter()
+            .map(|t| t.url.clone())
+            .collect();
+        assert_eq!(urls, ["u0", "u1"]);
         assert_eq!(env.played.borrow().last(), Some(&(2, 0)));
         // L on a favourite removes it
         let frames = drive(&env, &[Char('l'), Char('l'), Char('L')], 40, 120);

@@ -136,8 +136,9 @@ of every screen.
   - `f` plays an album from its first track.
 - **FAVOURITES** (middle, below LOCAL): every track you liked with `L`, local
   or YouTube, newest first. Saved in `~/.config/ymc/favourites.json`.
-  - `enter` / `f` play from the highlighted song through every song liked
-    after it, in the order you liked them.
+  - `enter` plays the highlighted song alone.
+  - `f` replaces the playlist with all your favourites, in the order you
+    liked them (oldest first).
   - `a` / `A` queue the highlighted song.
   - `L` removes the highlighted song.
 - **LAST 5 / FOR YOU** (top right): the last 5 albums you played, or YouTube
