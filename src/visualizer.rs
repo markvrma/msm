@@ -1,8 +1,10 @@
-//! Audio visualizer: circles made of one ring of particles per frequency
+//! Audio visualizer: shapes made of one ring of particles per frequency
 //! band, bass at the center and highs outward (a speaker cone, not a target).
-//! The FOR YOU pane gets one circle, the largest that fits, whose rings then
+//! The shape is a `Pattern`: circle, squiggly circle, star or square (V
+//! cycles them); only the distance metric changes, so everything else holds.
+//! The FOR YOU pane gets one shape, the largest that fits, whose rings then
 //! repeat outward (bands cycling 0, 1, 2, ...) to the pane edges and corners. The full-screen one (`multi`) gets
-//! overlapping circles of random size and place that together cover the
+//! overlapping shapes of random size and place that together cover the
 //! screen, all reading the same levels: a kick pulses the core of every one of
 //! them at once. A particle climbs a glyph
 //! ladder as its band gets louder -- it "jumps out" of the screen -- and sinks
@@ -113,6 +115,60 @@ fn palette(grid: &Grid) -> Vec<u8> {
     out
 }
 
+/// The shape the rings follow.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum Pattern {
+    #[default]
+    Circle,
+    Squiggle,
+    Star,
+    Square,
+}
+
+const WAVE: f64 = 0.12; // squiggle: radius wobble, share of the radius
+const WAVES: f64 = 8.0; // squiggle: wobbles per turn
+const INNER: f64 = 0.55; // star: valley radius over point radius
+
+impl Pattern {
+    pub const ALL: [Pattern; 4] = [
+        Pattern::Circle,
+        Pattern::Squiggle,
+        Pattern::Star,
+        Pattern::Square,
+    ];
+
+    pub fn next(self) -> Pattern {
+        Pattern::ALL[(self as usize + 1) % Pattern::ALL.len()]
+    }
+
+    /// Radial distance of (dx, dy), in square units, normalized so the shape
+    /// of size r is every point with metric < r.
+    fn metric(self, dx: f64, dy: f64) -> f64 {
+        let r = (dx * dx + dy * dy).sqrt();
+        let theta = dx.atan2(-dy); // 0 = straight up, so the star stands
+        match self {
+            Pattern::Circle => r,
+            Pattern::Square => dx.abs().max(dy.abs()),
+            Pattern::Squiggle => r / (1.0 + WAVE * (WAVES * theta).sin()),
+            Pattern::Star => {
+                // 5 points: 1 on a point, 0 in a valley, linear in between
+                let t = (theta / std::f64::consts::TAU * 5.0).rem_euclid(1.0);
+                r / (INNER + (1.0 - INNER) * (2.0 * t - 1.0).abs())
+            }
+        }
+    }
+
+    /// (inner, outer): the shape of size r holds every point nearer than
+    /// inner * r, and none further than outer * r along either axis.
+    fn reach(self) -> (f64, f64) {
+        match self {
+            Pattern::Circle | Pattern::Square => (1.0, 1.0),
+            Pattern::Squiggle => (1.0 - WAVE, 1.0 + WAVE),
+            Pattern::Star => (INNER, 1.0),
+        }
+    }
+}
+
 /// One particle per pane cell.
 #[derive(Clone, Copy, Default)]
 struct Particle {
@@ -135,7 +191,8 @@ pub struct Visualizer {
     last: Instant,
     rng: u32,
     live: bool,
-    multi: bool, // overlapping random circles instead of one
+    multi: bool, // overlapping random shapes instead of one
+    pattern: Pattern,
 }
 
 impl Visualizer {
@@ -152,6 +209,18 @@ impl Visualizer {
             rng: 0x9e37_79b9,
             live: false,
             multi,
+            pattern: Pattern::default(),
+        }
+    }
+
+    pub fn pattern(&self) -> Pattern {
+        self.pattern
+    }
+
+    pub fn set_pattern(&mut self, p: Pattern) {
+        if self.pattern != p {
+            self.pattern = p;
+            self.dims = (0, 0); // re-layout on the next render
         }
     }
 
@@ -227,7 +296,7 @@ impl Visualizer {
         if self.dims != (h, w) {
             self.layout(h, w);
         }
-        // multi circles overlap: per cell, the particle standing highest is drawn
+        // multi shapes overlap: per cell, the particle standing highest is drawn
         let mut top: Vec<Option<&Particle>> = vec![None; (h.max(0) * w.max(0)) as usize];
         for p in &self.parts {
             let t = &mut top[(p.y * w + p.x) as usize];
@@ -243,8 +312,8 @@ impl Visualizer {
         }
     }
 
-    /// Place particles: every circle splits into one ring per band, and each
-    /// ring's particles sit along its midline. A single circle is the largest
+    /// Place particles: every shape splits into one ring per band, and each
+    /// ring's particles sit along its midline. A single shape is the largest
     /// that fits, and past its sixth ring the rings keep going, same width,
     /// out to the corners, the bands cycling round again.
     fn layout(&mut self, h: i64, w: i64) {
@@ -257,7 +326,7 @@ impl Visualizer {
                     let (y, x) = (i / w, i % w);
                     let dx = x as f64 + 0.5 - w as f64 / 2.0;
                     let dy = (y as f64 + 0.5 - h as f64 / 2.0) * aspect;
-                    let ring = (dx * dx + dy * dy).sqrt() / rmax * N as f64;
+                    let ring = self.pattern.metric(dx, dy) / rmax * N as f64;
                     let off = (ring - (ring as usize) as f64 - 0.5).abs();
                     (off < 0.3).then(|| Particle {
                         y,
@@ -271,12 +340,14 @@ impl Visualizer {
             return;
         }
         self.parts.clear();
-        for (cx, cy, r) in circles(h, w, &mut self.rng) {
-            let (y0, y1) = (((cy - r) / ASPECT) as i64, ((cy + r) / ASPECT) as i64);
-            let (x0, x1) = ((cx - r) as i64, (cx + r) as i64);
+        let pat = self.pattern;
+        for (cx, cy, r) in shapes(pat, h, w, &mut self.rng) {
+            let o = r * pat.reach().1;
+            let (y0, y1) = (((cy - o) / ASPECT) as i64, ((cy + o) / ASPECT) as i64);
+            let (x0, x1) = ((cx - o) as i64, (cx + o) as i64);
             for y in y0.max(0)..=y1.min(h - 1) {
                 for x in x0.max(0)..=x1.min(w - 1) {
-                    let ring = dist(x, y, cx, cy) / r * N as f64;
+                    let ring = dist(pat, x, y, cx, cy) / r * N as f64;
                     let band = ring as usize;
                     let off = (ring - band as f64 - 0.5).abs();
                     if band < N && off < 0.3 {
@@ -296,20 +367,19 @@ impl Visualizer {
 
 const ASPECT: f64 = crate::tui::CELL_ASPECT;
 
-/// Distance from cell (x, y) to a point, in square units: a row is ASPECT
-/// columns tall, so circles come out round.
-fn dist(x: i64, y: i64, cx: f64, cy: f64) -> f64 {
-    let (dx, dy) = (x as f64 + 0.5 - cx, (y as f64 + 0.5) * ASPECT - cy);
-    (dx * dx + dy * dy).sqrt()
+/// Pattern distance from cell (x, y) to a point, in square units: a row is
+/// ASPECT columns tall, so circles come out round.
+fn dist(p: Pattern, x: i64, y: i64, cx: f64, cy: f64) -> f64 {
+    p.metric(x as f64 + 0.5 - cx, (y as f64 + 0.5) * ASPECT - cy)
 }
 
-/// Random circles (cx, cy, r in square units) until every cell of an h x w
+/// Random shapes (cx, cy, r in square units) until every cell of an h x w
 /// pane lies inside one. Radii run from a fifth to half the pane's shorter
 /// side (never under 6 columns, so six rings still fit), so the count grows
-/// with the pane. Each circle is centered near a random still-uncovered
-/// cell -- off by at most r/2 per axis, so that cell is always covered and
-/// the loop always ends.
-fn circles(h: i64, w: i64, rng: &mut u32) -> Vec<(f64, f64, f64)> {
+/// with the pane. Each shape is centered near a random still-uncovered
+/// cell -- off by at most inner*r/2 per axis, well inside the shape's inner
+/// reach, so that cell is always covered and the loop always ends.
+fn shapes(p: Pattern, h: i64, w: i64, rng: &mut u32) -> Vec<(f64, f64, f64)> {
     let side = (w as f64).min(h as f64 * ASPECT);
     let (rmin, rmax) = ((side / 5.0).max(6.0), (side / 2.0).max(6.0));
     let mut covered = vec![false; (h.max(0) * w.max(0)) as usize];
@@ -328,12 +398,12 @@ fn circles(h: i64, w: i64, rng: &mut u32) -> Vec<(f64, f64, f64)> {
             .unwrap()
             .0 as i64;
         let r = rmin + (rmax - rmin) * xorshift(rng) as f64;
-        let mut jog = || (xorshift(rng) as f64 - 0.5) * r;
+        let mut jog = || (xorshift(rng) as f64 - 0.5) * r * p.reach().0;
         let cx = (i % w) as f64 + 0.5 + jog();
         let cy = ((i / w) as f64 + 0.5) * ASPECT + jog();
         for (j, c) in covered.iter_mut().enumerate() {
             let j = j as i64;
-            *c |= dist(j % w, j / w, cx, cy) < r;
+            *c |= dist(p, j % w, j / w, cx, cy) < r;
         }
         out.push((cx, cy, r));
     }
@@ -383,36 +453,56 @@ mod tests {
         assert_eq!(loudest, 1, "{db:?}");
     }
 
-    /// The pane's single circle reaches every corner: its rings repeat past
+    /// The pane's single shape reaches every corner: its rings repeat past
     /// the sixth, bands cycling.
     #[test]
-    fn single_circle_reaches_the_corners() {
+    fn single_shape_reaches_the_corners() {
         let (h, w) = (24, 80);
-        let mut v = Visualizer::new(false);
-        v.layout(h, w);
-        assert!(
-            v.parts.iter().any(|p| p.y == 0 && p.band < 3),
-            "no repeated rings"
-        );
-        for (cy, cx) in [(0, 0), (0, w - 2), (h - 2, 0), (h - 2, w - 2)] {
-            let near = |p: &&Particle| (cy..cy + 2).contains(&p.y) && (cx..cx + 2).contains(&p.x);
+        for pat in Pattern::ALL {
+            let mut v = Visualizer::new(false);
+            v.set_pattern(pat);
+            v.layout(h, w);
             assert!(
-                v.parts.iter().any(|p| near(&p)),
-                "corner ({cy}, {cx}) empty"
+                v.parts.iter().any(|p| p.y == 0 && p.band < 3),
+                "{pat:?}: no repeated rings"
             );
+            for (cy, cx) in [(0, 0), (0, w - 2), (h - 2, 0), (h - 2, w - 2)] {
+                let near =
+                    |p: &&Particle| (cy..cy + 2).contains(&p.y) && (cx..cx + 2).contains(&p.x);
+                assert!(
+                    v.parts.iter().any(|p| near(&p)),
+                    "{pat:?}: corner ({cy}, {cx}) empty"
+                );
+            }
         }
     }
 
     #[test]
-    fn circles_cover_every_cell() {
+    fn shapes_cover_every_cell() {
         let (h, w) = (24, 80);
-        let cs = circles(h, w, &mut 0x9e37_79b9);
-        assert!(cs.len() > 1, "{cs:?}");
-        for (y, x) in (0..h).flat_map(|y| (0..w).map(move |x| (y, x))) {
-            assert!(
-                cs.iter().any(|&(cx, cy, r)| dist(x, y, cx, cy) < r),
-                "({y}, {x}) uncovered"
-            );
+        for pat in Pattern::ALL {
+            let cs = shapes(pat, h, w, &mut 0x9e37_79b9);
+            assert!(cs.len() > 1, "{pat:?}: {cs:?}");
+            for (y, x) in (0..h).flat_map(|y| (0..w).map(move |x| (y, x))) {
+                assert!(
+                    cs.iter().any(|&(cx, cy, r)| dist(pat, x, y, cx, cy) < r),
+                    "{pat:?}: ({y}, {x}) uncovered"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn next_cycles_every_pattern() {
+        let mut p = Pattern::Circle;
+        for want in [
+            Pattern::Squiggle,
+            Pattern::Star,
+            Pattern::Square,
+            Pattern::Circle,
+        ] {
+            p = p.next();
+            assert_eq!(p, want);
         }
     }
 }
