@@ -188,6 +188,7 @@ These flags appear in front of the label while a mode is on:
 | `L` | like the highlighted track, or the playing track (needs sign-in) |
 | `v` | full-screen visualizer, above the progress bar. The other browse keys keep working; `v` again goes back. |
 | `V` | cycle the visualizer pattern: circle, squiggly circle, star, square (pane and full screen together) |
+| `C` | auto-cycle the visualizer pattern every second; `C` again stops on the current one |
 | `/` | search |
 | `Ctrl-Z` | suspend msm and mpv (music stops). Resume with `fg`. |
 | `q`, `Ctrl-C` | quit |
