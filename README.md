@@ -84,7 +84,7 @@ Upgrading from the old Python version? Run `pipx uninstall msm-player` (or
 Without signing in, msm searches and plays anonymously. Signing in:
 
 - records your plays to your YouTube Music history
-- turns on `L` (like)
+- makes `L` also thumbs-up YouTube tracks on your account
 - swaps the **LAST 5** pane for personalized **FOR YOU** recommendations
 
 There is nothing to paste. msm reads your session cookies straight from your
@@ -134,6 +134,13 @@ of every screen.
     - `a` / `A` queue the highlighted track.
     - `Esc`, or any key that leaves the pane (`h`, `l`, `/`), goes back to the album list.
   - `f` plays an album from its first track.
+- **FAVOURITES** (middle, below LOCAL): every track you liked with `L`, local
+  or YouTube, newest first. Saved in `~/.config/ymc/favourites.json`.
+  - `enter` plays the highlighted song alone.
+  - `f` replaces the playlist with all your favourites, in the order you
+    liked them (oldest first).
+  - `a` / `A` queue the highlighted song.
+  - `L` removes the highlighted song.
 - **LAST 5 / FOR YOU** (top right): the last 5 albums you played, or YouTube
   Music recommendations when you're signed in.
   - `enter` loads one into NOW.
@@ -159,7 +166,7 @@ albums, then playlists (the top 5 of each), tagged `[song]`, `[album]` or
 ### Progress bar
 
 The label shows `▶` while playing or `‖` while paused, followed by the track
-title. Short messages such as `♥ liked: …` or `⏭ queued: …` briefly take over
+title. Short messages such as `♥ added to favourites: …` or `⏭ queued: …` briefly take over
 the label.
 
 These flags appear in front of the label while a mode is on:
@@ -174,7 +181,7 @@ These flags appear in front of the label while a mode is on:
 
 | key | action |
 |---|---|
-| `h` / `l` | switch pane (NOW ↔ LOCAL ↔ LAST 5 / FOR YOU) |
+| `h` / `l` | switch pane (NOW ↔ LOCAL ↔ FAVOURITES ↔ LAST 5 / FOR YOU) |
 | `j` / `k`, `↓` / `↑` | move |
 | `enter` | open / play (see [Screens](#screens)) |
 | `f` | play from the start |
@@ -185,7 +192,7 @@ These flags appear in front of the label while a mode is on:
 | `r` | repeat-all (see below) |
 | `e` | left-ear-only: music folded into the left channel, right channel silent |
 | `[` / `]` | volume −5 / +5. This is msm's own mpv volume; the system mixer and other apps are untouched. |
-| `L` | like the highlighted track, or the playing track (needs sign-in) |
+| `L` | add the highlighted track (NOW / FAVOURITES), or the playing one, to FAVOURITES; again removes it. YouTube tracks also get a thumbs-up when signed in. |
 | `v` | full-screen visualizer, above the progress bar. The other browse keys keep working; `v` again goes back. |
 | `V` | cycle the visualizer pattern: circle, squiggly circle, star, square (pane and full screen together) |
 | `/` | search |

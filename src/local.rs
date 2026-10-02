@@ -1,8 +1,8 @@
 //! Local ~/Music library, play history, album-art download cache.
 //! Port of ymc.py art_file/scan_local/_probe/load_local_album/local_art/history.
 
-use crate::{art_cache, hist_path, local_music, Album, LocalDir, Track, AUDIO_EXT};
-use serde::Serialize;
+use crate::{art_cache, fav_path, hist_path, local_music, Album, LocalDir, Track, AUDIO_EXT};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
@@ -362,18 +362,75 @@ pub fn record(title: &str, tracks: &[Track], thumb: &str) -> Vec<Album> {
         },
     );
     h.truncate(5);
-    let p = hist_path();
+    if let Ok(s) = to_python_json(&h) {
+        write_atomic(&hist_path(), &s);
+    }
+    h
+}
+
+/// tmp + rename in the same dir: a crash mid-write must not leave invalid
+/// JSON (load -> [] -> the next write loses everything).
+fn write_atomic(p: &Path, s: &str) {
     if let Some(d) = p.parent() {
         let _ = std::fs::create_dir_all(d);
     }
-    if let Ok(s) = to_python_json(&h) {
-        // tmp + rename: a crash mid-write must not leave invalid JSON (load -> [] -> history lost)
-        let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, s).is_ok() {
-            let _ = std::fs::rename(&tmp, &p);
-        }
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, s).is_ok() {
+        let _ = std::fs::rename(&tmp, p);
     }
-    h
+}
+
+/// One favourites.json entry: the whole track (so it plays and shows art
+/// without a lookup) plus when it was liked. The file is kept in like
+/// order, oldest first.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Fav {
+    pub track: Track,
+    pub liked_at: u64,
+}
+
+/// favourites.json, [] when missing or unreadable; an entry that won't parse
+/// is dropped alone so one bad line can't blank the list (the next save
+/// would then overwrite it).
+pub fn load_favs() -> Vec<Fav> {
+    std::fs::read(fav_path())
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Vec<Value>>(&b).ok())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect()
+}
+
+pub fn save_favs(favs: &[Fav]) {
+    if let Ok(s) = serde_json::to_string(favs) {
+        write_atomic(&fav_path(), &s);
+    }
+}
+
+/// Remove `t` if its url is already a favourite, else append it. -> added?
+pub fn toggle_in(favs: &mut Vec<Fav>, t: &Track, now: u64) -> bool {
+    let before = favs.len();
+    favs.retain(|f| f.track.url != t.url);
+    if favs.len() != before {
+        return false;
+    }
+    favs.push(Fav {
+        track: t.clone(),
+        liked_at: now,
+    });
+    true
+}
+
+/// toggle_in on the file. -> (list after, added?)
+pub fn toggle_fav(t: &Track) -> (Vec<Fav>, bool) {
+    let mut favs = load_favs();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let added = toggle_in(&mut favs, t, now);
+    save_favs(&favs);
+    (favs, added)
 }
 
 /// json.dump default style: ", " / ": " separators, ensure_ascii=True.
@@ -477,6 +534,42 @@ mod tests {
         assert_eq!(h[0].title, "Album 3"); // most recent first
         assert_eq!(h.iter().filter(|a| a.title == "Album 3").count(), 1); // no dup
         assert_eq!(h[0].tracks.as_ref().unwrap()[0].title, "again");
+    }
+
+    #[test]
+    fn test_favs_round_trip_and_toggle() {
+        let t = |u: &str| Track {
+            title: format!("T {u}"),
+            artist: "A".into(),
+            duration: 200,
+            url: u.into(),
+            thumb: "/art/x.jpg".into(),
+            ..Default::default()
+        };
+        let (favs, raw) = with_home("favs", |_| {
+            assert!(load_favs().is_empty()); // missing file
+            assert!(toggle_fav(&t("/Music/a.mp3")).1);
+            assert!(toggle_fav(&t("https://music.youtube.com/watch?v=b")).1);
+            assert!(!toggle_fav(&t("/Music/a.mp3")).1); // again = removed, no dup
+            assert!(toggle_fav(&t("/Music/a.mp3")).1); // back, now the newest
+            let favs = load_favs();
+            std::fs::write(fav_path(), b"[{\"junk\": 1}, ").unwrap();
+            assert!(load_favs().is_empty()); // corrupt file -> [], no panic
+            let raw = format!(
+                "[{{\"junk\": 1}}, {}]",
+                serde_json::to_string(&favs[0]).unwrap()
+            );
+            std::fs::write(fav_path(), raw).unwrap();
+            (favs, load_favs())
+        });
+        let urls: Vec<_> = favs.iter().map(|f| f.track.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://music.youtube.com/watch?v=b", "/Music/a.mp3"]
+        );
+        assert_eq!(favs[1].track, t("/Music/a.mp3")); // whole track survives
+        assert!(favs[0].liked_at > 0);
+        assert_eq!(raw, favs[..1]); // bad entry dropped alone
     }
 
     #[test]

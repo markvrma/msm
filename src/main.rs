@@ -57,6 +57,10 @@ pub fn config_dir() -> PathBuf {
 pub fn hist_path() -> PathBuf {
     config_dir().join("history.json")
 }
+/// config_dir()/favourites.json
+pub fn fav_path() -> PathBuf {
+    config_dir().join("favourites.json")
+}
 /// config_dir()/art
 pub fn art_cache() -> PathBuf {
     config_dir().join("art")
