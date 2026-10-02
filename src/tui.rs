@@ -783,7 +783,6 @@ impl State {
                 .and_then(|a| a.tracks.as_ref())
                 .map_or(0, Vec::len),
             1 => self.artists().len(),
-            1 => self.local.len(),
             2 => self.favs.len(),
             _ => self.pane2_len(),
         }) as i64
@@ -928,15 +927,16 @@ impl State {
     }
 
     /// Album selected in the focused list pane (1=LOCAL's artist album list,
-    /// 2=FOR YOU/hist), or None. Pane 0 (NOW) and the LOCAL artist list have
-    /// no single album to open.
+    /// 2=all FAVOURITES, 3=FOR YOU/hist), or None. Pane 0 (NOW) and the LOCAL
+    /// artist list have no single album to open.
     fn cur_album(&self) -> Option<Src> {
         match self.focus {
             1 => self
                 .artist_albums()
                 .get(self.asel as usize)
                 .map(|&i| Src::Local(i)),
-            2 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[2] as usize)),
+            2 => self.fav_album(true).map(|a| Src::Temp(Box::new(a))),
+            3 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[3] as usize)),
             _ => None,
         }
     }
@@ -1901,6 +1901,9 @@ mod tests {
         st.handle_key(&env, Char('f'));
         assert_eq!((st.artist.clone(), st.focus), (None, 0));
         assert_eq!(*env.played.borrow(), vec![(3, 0), (3, 0)]);
+    }
+
+    #[test]
     fn favourites_list_newest_first_and_play_in_like_order() {
         utf8_locale();
         use Key::*;
@@ -1912,6 +1915,7 @@ mod tests {
         // select the older one (T0, second row), enter = T0 alone
         let keys = [
             Char('l'),
+            Enter,
             Char('f'),
             Char('L'),
             Char('j'),
@@ -1924,7 +1928,7 @@ mod tests {
         let frames = drive(&env, &keys, 40, 120);
         // FAVOURITES focused, both liked: T1 (newer) above T0. NOW sits above
         // the pane's top edge, so only favourite rows follow its title.
-        let f = &frames[7];
+        let f = &frames[8];
         let favs = &f[f.find("FAVOURITES").expect(f)..];
         assert!(favs.find("T1").unwrap() < favs.find("T0").unwrap(), "{f}");
         let urls: Vec<_> = env
