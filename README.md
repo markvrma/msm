@@ -30,7 +30,7 @@ Developed on macOS; Linux builds and tests run in CI. Windows is not supported.
 One line, macOS or Linux:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/markvrma/yt-music-cli/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/markvrma/msm/master/install.sh | sh
 ```
 
 The script:
@@ -50,7 +50,7 @@ Prefer to do it by hand? Install the tools yourself, then use cargo directly:
 
 ```sh
 brew install mpv yt-dlp ffmpeg                                 # macOS (+ cmusfm for scrobbling)
-cargo install --git https://github.com/markvrma/yt-music-cli   # straight from git
+cargo install --git https://github.com/markvrma/msm   # straight from git
 cargo install --path .                                          # from a local clone
 ```
 

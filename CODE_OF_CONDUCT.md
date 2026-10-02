@@ -14,7 +14,7 @@ Not acceptable: harassment, trolling, insults, personal or political attacks, pu
 
 The maintainer ([@markvrma](https://github.com/markvrma)) is responsible for enforcement and may remove, edit, or reject comments, commits, issues, and other contributions that violate this code, and may temporarily or permanently ban contributors.
 
-To report a problem, open a [GitHub issue](https://github.com/markvrma/yt-music-cli/issues) titled "Conduct" (keep details minimal in public) or contact the maintainer through their GitHub profile. Reports are handled with discretion. Enforcement follows the [Contributor Covenant 2.1 enforcement guidelines](https://www.contributor-covenant.org/version/2/1/code_of_conduct/#enforcement-guidelines).
+To report a problem, open a [GitHub issue](https://github.com/markvrma/msm/issues) titled "Conduct" (keep details minimal in public) or contact the maintainer through their GitHub profile. Reports are handled with discretion. Enforcement follows the [Contributor Covenant 2.1 enforcement guidelines](https://www.contributor-covenant.org/version/2/1/code_of_conduct/#enforcement-guidelines).
 
 ## Attribution
 

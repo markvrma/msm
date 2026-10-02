@@ -1,9 +1,9 @@
 #!/bin/sh
 # Install msm (YouTube Music TUI): checks runtime tools, then builds from git.
-#   curl -fsSL https://raw.githubusercontent.com/markvrma/yt-music-cli/master/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/markvrma/msm/master/install.sh | sh
 set -eu
 
-REPO=https://github.com/markvrma/yt-music-cli
+REPO=https://github.com/markvrma/msm
 TOOLS="mpv yt-dlp ffmpeg"   # ffmpeg also provides ffprobe
 OPTIONAL="cmusfm"           # Last.fm scrobbling only
 
