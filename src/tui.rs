@@ -702,13 +702,15 @@ struct State {
     results: Vec<Item>,
     now: Option<Album>,
     now_art: Option<PathBuf>,
-    drill: Option<usize>, // index into `local` of the album opened inside the LOCAL pane
-    dsel: i64,            // selection inside that tracklist
-    flash: String,        // transient status shown in the progress bar (e.g. "♥ liked")
-    flash_ttl: i32,       // half-second ticks the flash stays visible
-    flash_tick: Instant,  // last tick taken off flash_ttl
-    viz: Visualizer,      // replaces the FOR YOU list while music plays
-    full: bool,           // v: browse screen given over to vfull
+    artist: Option<String>, // artist opened inside the LOCAL pane (sel[1] picks it)
+    asel: i64,              // selection inside that artist's album list
+    drill: Option<usize>,   // index into `local` of the album opened from that list
+    dsel: i64,              // selection inside that tracklist
+    flash: String,          // transient status shown in the progress bar (e.g. "♥ liked")
+    flash_ttl: i32,         // half-second ticks the flash stays visible
+    flash_tick: Instant,    // last tick taken off flash_ttl
+    viz: Visualizer,        // replaces the FOR YOU list while music plays
+    full: bool,             // v: browse screen given over to vfull
     vfull: Visualizer,
     art_memo: (Option<String>, Option<PathBuf>), // (url, path): cover art of the playing track
 }
@@ -731,6 +733,8 @@ impl State {
             results: Vec::new(),
             now: None,
             now_art: None,
+            artist: None,
+            asel: 0,
             drill: None,
             dsel: 0,
             flash: String::new(),
@@ -778,10 +782,38 @@ impl State {
                 .as_ref()
                 .and_then(|a| a.tracks.as_ref())
                 .map_or(0, Vec::len),
+            1 => self.artists().len(),
             1 => self.local.len(),
             2 => self.favs.len(),
             _ => self.pane2_len(),
         }) as i64
+    }
+
+    /// LOCAL artists, unique and sorted ignoring case (case variants merge).
+    fn artists(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .local
+            .iter()
+            .filter_map(|a| a.local.as_ref().map(|l| l.artist.clone()))
+            .collect();
+        v.sort_by_key(|s| s.to_lowercase());
+        v.dedup_by_key(|s| s.to_lowercase());
+        v
+    }
+
+    /// Indices into `local` of the opened artist's albums.
+    fn artist_albums(&self) -> Vec<usize> {
+        let Some(key) = self.artist.as_ref().map(|s| s.to_lowercase()) else {
+            return vec![];
+        };
+        (0..self.local.len())
+            .filter(|&i| {
+                self.local[i]
+                    .local
+                    .as_ref()
+                    .is_some_and(|l| l.artist.to_lowercase() == key)
+            })
+            .collect()
     }
 
     fn now_tracks(&self) -> Option<&Vec<Track>> {
@@ -895,14 +927,16 @@ impl State {
         self.flash_ttl = 6;
     }
 
-    /// Album selected in the focused list pane (1=LOCAL, 3=FOR YOU/hist),
-    /// or None. Pane 0 (NOW) has no separate album to open; FAVOURITES
-    /// builds one (see `fav_album`).
+    /// Album selected in the focused list pane (1=LOCAL's artist album list,
+    /// 2=FOR YOU/hist), or None. Pane 0 (NOW) and the LOCAL artist list have
+    /// no single album to open.
     fn cur_album(&self) -> Option<Src> {
         match self.focus {
-            1 if !self.local.is_empty() => Some(Src::Local(self.sel[1] as usize)),
-            2 => self.fav_album(true).map(|a| Src::Temp(Box::new(a))),
-            3 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[3] as usize)),
+            1 => self
+                .artist_albums()
+                .get(self.asel as usize)
+                .map(|&i| Src::Local(i)),
+            2 if self.pane2_len() > 0 => Some(Src::Pane2(self.sel[2] as usize)),
             _ => None,
         }
     }
@@ -1031,17 +1065,34 @@ impl State {
                         .collect();
                     draw_rows(&mut buf, wm, &rows, self.dsel, self.focus == 1);
                 }
+            } else if let Some(name) = &self.artist {
+                let title = format!("{name}  (esc=back enter=open f=play a=queue)");
+                if let Some(wm) = draw_box(
+                    &mut buf,
+                    0,
+                    lay.npw,
+                    main_h,
+                    lay.lmw,
+                    &title,
+                    self.focus == 1,
+                ) {
+                    let rows: Vec<String> = self
+                        .artist_albums()
+                        .iter()
+                        .map(|&i| self.local[i].title.clone())
+                        .collect();
+                    draw_rows(&mut buf, wm, &rows, self.asel, self.focus == 1);
+                }
             } else if let Some(wm) = draw_box(
                 &mut buf,
                 0,
                 lay.npw,
                 loc_h,
                 lay.lmw,
-                "LOCAL ~/Music  (enter=open f=play)",
+                "LOCAL ~/Music  (enter=open artist)",
                 self.focus == 1,
             ) {
-                let rows: Vec<String> = self.local.iter().map(|a| a.title.clone()).collect();
-                draw_rows(&mut buf, wm, &rows, self.sel[1], self.focus == 1);
+                draw_rows(&mut buf, wm, &self.artists(), self.sel[1], self.focus == 1);
             }
             if let Some(wf) = draw_box(
                 &mut buf,
@@ -1229,8 +1280,9 @@ impl State {
             return false;
         }
 
-        // LOCAL pane showing an album's tracklist: its own keys, and any key
-        // that leaves the pane (h/l, /, Esc) closes it back to the album list.
+        // LOCAL pane showing an album's tracklist: its own keys; Esc goes back
+        // to the artist's albums, any other key that leaves the pane (h/l, /)
+        // closes all the way back to the artist list.
         if let (Some(d), 1) = (self.drill, self.focus) {
             let dtracks = self.local[d].tracks.clone().unwrap_or_default();
             let n = dtracks.len() as i64;
@@ -1263,7 +1315,7 @@ impl State {
                         };
                         self.do_play(env, Src::Temp(Box::new(one)), 0);
                     }
-                    (self.drill, self.focus, self.sel[0]) = (None, 0, 0);
+                    (self.drill, self.artist, self.focus, self.sel[0]) = (None, None, 0, 0);
                     return true;
                 }
                 Char('a' | 'A') => {
@@ -1283,7 +1335,48 @@ impl State {
             if c == Esc {
                 return true; // Esc: back to the album list, nothing else
             }
+            self.artist = None;
             // h/l, /, space, n/p ... fall through to the normal browse keys
+        }
+        // LOCAL pane showing an artist's albums: j/k, enter opens the
+        // tracklist, f plays; a/A fall through to the queue keys below
+        // (cur_album is this list's pick). Esc goes back to the artists, any
+        // other key closes it like the tracklist does.
+        if let (Some(_), None, 1) = (&self.artist, self.drill, self.focus) {
+            let albums = self.artist_albums();
+            let n = albums.len() as i64;
+            let cur = albums.get(self.asel as usize).copied();
+            match c {
+                Char('j') | Down => {
+                    self.asel = clamp(self.asel + 1, 0, n - 1);
+                    return true;
+                }
+                Char('k') | Up => {
+                    self.asel = clamp(self.asel - 1, 0, n - 1);
+                    return true;
+                }
+                Enter => {
+                    if let Some(i) = cur {
+                        if let Some((_, true)) = self.ensure(env, &Src::Local(i)) {
+                            (self.drill, self.dsel) = (Some(i), 0);
+                        }
+                    }
+                    return true;
+                }
+                Char('f') => {
+                    if let Some(i) = cur {
+                        self.do_play(env, Src::Local(i), 0);
+                        (self.artist, self.focus, self.sel[0]) = (None, 0, 0);
+                    }
+                    return true;
+                }
+                Char('a' | 'A') => {}
+                Esc => {
+                    self.artist = None;
+                    return true;
+                }
+                _ => self.artist = None,
+            }
         }
         match c {
             Char('/') => {
@@ -1319,10 +1412,8 @@ impl State {
                 if self.focus == 0 && self.now_tracks().is_some() {
                     self.do_play(env, Src::Now, self.sel[0] as usize);
                 } else if self.focus == 1 {
-                    if let Some(Src::Local(i)) = self.cur_album() {
-                        if let Some((_, true)) = self.ensure(env, &Src::Local(i)) {
-                            (self.drill, self.dsel) = (Some(i), 0);
-                        }
+                    if let Some(a) = self.artists().into_iter().nth(self.sel[1] as usize) {
+                        (self.artist, self.asel) = (Some(a), 0);
                     }
                 } else if self.focus == 2 {
                     // enter = this song alone; f (below) = the whole list
@@ -1603,6 +1694,7 @@ pub fn run(yt: Arc<Yt>, player: &Player) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LocalDir;
     use std::cell::RefCell;
 
     #[derive(Default)]
@@ -1718,7 +1810,10 @@ mod tests {
         Album {
             title: "Album X".into(),
             tracks: Some(tracks),
-            local: Some(Default::default()),
+            local: Some(LocalDir {
+                artist: "Artist Y".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }
     }
@@ -1726,9 +1821,9 @@ mod tests {
     #[test]
     fn test_local_pane_opens_an_album_tracklist_and_esc_puts_the_list_back() {
         utf8_locale();
-        // enter on a LOCAL album swaps the pane to its tracks; j/k move inside it,
-        // enter plays the highlighted track alone, f the album from there, Esc
-        // restores the album list.
+        // enter on an album in an artist's list swaps the pane to its tracks;
+        // j/k move inside it, enter plays the highlighted track alone, f the
+        // album from there, Esc restores the album list.
         use Key::*;
         let env = Fake {
             local: vec![album_x()],
@@ -1737,6 +1832,7 @@ mod tests {
         let keys = [
             Char('l'),
             Enter,
+            Enter,
             Char('j'),
             Esc,
             Enter,
@@ -1744,25 +1840,67 @@ mod tests {
             Enter,
             Char('l'),
             Enter,
+            Enter,
             Char('j'),
             Char('f'),
         ];
         let frames = drive(&env, &keys, 40, 120);
         assert!(
-            frames[2].contains("Album X") && frames[2].contains("T2"),
+            frames[3].contains("Album X") && frames[3].contains("T2"),
             "{}",
-            frames[2]
+            frames[3]
         );
-        assert!(
-            !frames[2].contains("LOCAL ~/Music"),
-            "album list still there"
-        );
-        assert!(frames[4].contains("LOCAL ~/Music"), "{}", frames[4]); // Esc -> album list back
-                                                                       // enter = the highlighted track alone; f = the whole album from there
+        assert!(!frames[3].contains("Artist Y"), "album list still there");
+        assert!(frames[5].contains("Artist Y  (esc"), "{}", frames[5]); // Esc -> album list back
+        assert!(!frames[5].contains("T2"), "{}", frames[5]);
+        // enter = the highlighted track alone; f = the whole album from there
         assert_eq!(*env.played.borrow(), vec![(1, 0), (3, 1)]);
     }
 
     #[test]
+    fn test_local_pane_artist_albums_tracks_and_back() {
+        utf8_locale();
+        // artists list (case variants merged) -> enter: that artist's albums
+        // only -> enter: tracklist -> Esc: albums -> Esc: artists. In the album
+        // list a queues the album, f plays it from track 0.
+        use Key::*;
+        let mut z = album_x();
+        z.title = "Album Z".into();
+        z.local.as_mut().unwrap().artist = "artist y".into(); // same artist, other case
+        let mut w = album_x();
+        w.title = "Album W".into();
+        w.local.as_mut().unwrap().artist = "Band B".into();
+        let env = Fake {
+            local: vec![album_x(), w, z],
+            ..Default::default()
+        };
+        let mut st = State::new(&env);
+        let frame = |st: &mut State| st.draw(&env, 40, 120).text();
+        st.handle_key(&env, Char('l'));
+        assert_eq!(st.artists(), ["Artist Y", "Band B"]);
+        let f = frame(&mut st);
+        assert!(f.contains("Artist Y") && f.contains("Band B") && !f.contains("Album X"));
+        st.handle_key(&env, Enter);
+        let f = frame(&mut st);
+        assert!(f.contains("Album X") && f.contains("Album Z") && !f.contains("Album W"));
+        st.handle_key(&env, Char('j'));
+        st.handle_key(&env, Enter);
+        assert_eq!(st.drill, Some(2));
+        assert!(frame(&mut st).contains("Album Z  (esc=back"));
+        st.handle_key(&env, Esc);
+        assert_eq!((st.drill, st.asel), (None, 1)); // back on Album Z
+        assert!(frame(&mut st).contains("Artist Y  (esc=back"));
+        st.handle_key(&env, Esc);
+        assert_eq!(st.artist, None);
+        assert!(frame(&mut st).contains("LOCAL ~/Music"));
+        // album list: a queues the whole album (nothing playing -> starts it), f plays from 0
+        st.handle_key(&env, Enter);
+        st.handle_key(&env, Char('a'));
+        assert!(st.artist.is_some(), "a keeps the album list open");
+        st.handle_key(&env, Char('j'));
+        st.handle_key(&env, Char('f'));
+        assert_eq!((st.artist.clone(), st.focus), (None, 0));
+        assert_eq!(*env.played.borrow(), vec![(3, 0), (3, 0)]);
     fn favourites_list_newest_first_and_play_in_like_order() {
         utf8_locale();
         use Key::*;
@@ -1879,9 +2017,10 @@ mod tests {
             local: vec![album_x()],
             ..Default::default()
         };
-        let frames = drive(&env, &[Char('l'), Enter, Other], 40, 120);
-        assert!(!frames[2].contains("LOCAL ~/Music"), "{}", frames[2]);
-        assert!(frames[3].contains("LOCAL ~/Music"), "{}", frames[3]);
+        // from the tracklist an unbound key goes all the way back to the artists
+        let frames = drive(&env, &[Char('l'), Enter, Enter, Other], 40, 120);
+        assert!(!frames[3].contains("LOCAL ~/Music"), "{}", frames[3]);
+        assert!(frames[4].contains("LOCAL ~/Music"), "{}", frames[4]);
         assert_eq!(
             map_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
             [Other]

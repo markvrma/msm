@@ -73,7 +73,8 @@ fn key12(s: &str) -> String {
     sha1_smol::Sha1::from(s).digest().to_string()[..12].to_owned()
 }
 
-/// Immediate subdirs of ~/Music containing audio = albums (lazy, no tags).
+/// Immediate subdirs of ~/Music containing audio = albums (lazy: only the
+/// first file is probed, for the artist).
 pub fn scan_local() -> Vec<Album> {
     scan_dir(&local_music())
 }
@@ -110,13 +111,42 @@ fn scan_dir(root: &Path) -> Vec<Album> {
         if !files.is_empty() {
             out.push(Album {
                 title: name,
-                local: Some(LocalDir { dir: d, files }),
+                local: Some(LocalDir {
+                    dir: d,
+                    files,
+                    artist: String::new(),
+                }),
                 tracks: None,
                 ..Default::default()
             });
         }
     }
+    // one ffprobe per album. Each run is mostly process-launch wait, not CPU,
+    // so run 4 per core at once.
+    // ponytail: startup still grows with album count (each probe ~0.15s);
+    // cache the artist keyed by dir mtime, or probe after first paint, if it bites.
+    let n = std::thread::available_parallelism().map_or(4, |n| n.get()) * 4;
+    let chunk = out.len().div_ceil(n).max(1);
+    std::thread::scope(|s| {
+        for part in out.chunks_mut(chunk) {
+            s.spawn(|| {
+                for l in part.iter_mut().filter_map(|a| a.local.as_mut()) {
+                    l.artist = artist_of(&probe(&l.dir.join(&l.files[0])).0);
+                }
+            });
+        }
+    });
     out
+}
+
+/// album_artist, then artist, else "Unknown Artist".
+fn artist_of(tags: &BTreeMap<String, String>) -> String {
+    ["album_artist", "albumartist", "album artist", "artist"]
+        .iter()
+        .filter_map(|k| tags.get(*k).map(|s| s.trim()))
+        .find(|s| !s.is_empty())
+        .unwrap_or("Unknown Artist")
+        .to_owned()
 }
 
 /// subprocess.run(..., timeout=secs): stdout captured, killed on timeout.
@@ -620,6 +650,7 @@ mod tests {
         assert_eq!(l.files, ["B.mp3", "b.FLAC"]); // plain code-point sort
         assert_eq!(l.dir, root.join("beta"));
         assert!(a[1].tracks.is_none());
+        assert_eq!(l.artist, "Unknown Artist"); // fake audio: probe fails
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -677,6 +708,11 @@ mod tests {
         assert_eq!(dur, 198.73);
         assert_eq!(parse_probe(b"{}").unwrap().1, 0.0);
         assert!(parse_probe(b"").is_none());
+        assert_eq!(artist_of(&tags), "A");
+        let mut both = tags.clone();
+        both.insert("album_artist".into(), "AA".into());
+        assert_eq!(artist_of(&both), "AA");
+        assert_eq!(artist_of(&BTreeMap::new()), "Unknown Artist");
         assert_eq!(
             probe(Path::new("/nonexistent/x.mp3")),
             (BTreeMap::new(), 0.0)
