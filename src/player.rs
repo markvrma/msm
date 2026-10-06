@@ -346,10 +346,12 @@ impl Player {
             .stderr(Stdio::null());
         // Only when auth actually found a session in that browser: without
         // one, yt-dlp dies on the missing cookie db and nothing plays, while
-        // anonymous playback works fine.
+        // anonymous playback works fine. Cookies switch yt-dlp to the web
+        // clients, whose stream URLs 403 without a GVS PO token, and yt-dlp
+        // won't ask a PO token provider plugin (bgutil) for one unless forced.
         if yt.authed() {
             cmd.arg(format!(
-                "--ytdl-raw-options=cookies-from-browser={}",
+                "--ytdl-raw-options=cookies-from-browser={},extractor-args=youtube:fetch_pot=always",
                 crate::cookie_browser()
             ));
         }
