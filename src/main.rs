@@ -92,6 +92,34 @@ pub fn run_dir() -> Result<PathBuf, String> {
     }
     Ok(d)
 }
+/// Append one timestamped line to run_dir()/msm.log (0600), so errors that
+/// only flash in the TUI survive. Best effort: never fails the caller.
+// ponytail: no rotation; one line per user-visible error stays tiny. Rotate if it grows.
+pub fn log_err(msg: &str) {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    if cfg!(test) {
+        return; // tui tests' fake env fails on purpose; keep the real log clean
+    }
+    let Ok(d) = run_dir() else { return };
+    let mut ts = [0u8; 32];
+    // SAFETY: time/localtime_r/strftime write only into our locals; the format is NUL-terminated.
+    let n = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        libc::strftime(ts.as_mut_ptr().cast(), ts.len(), c"%F %T".as_ptr(), &tm)
+    };
+    let ts = String::from_utf8_lossy(&ts[..n]);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(d.join("msm.log"))
+    {
+        let _ = writeln!(f, "{ts} {msg}");
+    }
+}
 /// $MSM_COOKIE_BROWSER, default "chrome"
 pub fn cookie_browser() -> String {
     std::env::var("MSM_COOKIE_BROWSER").unwrap_or_else(|_| "chrome".into())
@@ -172,7 +200,7 @@ env:
   MSM_COOKIE_BROWSER  browser to read YouTube cookies from (default chrome)
   MSM_MUSIC_DIR       local library (default ~/Music)
   XDG_CONFIG_HOME     config/history/art under $XDG_CONFIG_HOME/ymc (default ~/.config/ymc)
-  XDG_RUNTIME_DIR     mpv socket + log under $XDG_RUNTIME_DIR/msm (default $TMPDIR/msm-<uid>)
+  XDG_RUNTIME_DIR     mpv socket, mpv.log, msm.log (errors) under $XDG_RUNTIME_DIR/msm (default $TMPDIR/msm-<uid>)
 ";
 
 fn main() {

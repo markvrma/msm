@@ -468,7 +468,7 @@ trait Env {
     fn authed(&self) -> bool;
     /// Fill `recs` off-thread (network) so it can't delay first paint.
     fn spawn_recs(&self, recs: Arc<Mutex<Vec<Album>>>);
-    fn search_all(&self, q: &str) -> Vec<Item>;
+    fn search_all(&self, q: &str) -> Result<Vec<Item>, String>;
     fn resolve_result(&self, r: &Item) -> Result<(String, Vec<Track>, String), String>;
     fn like_track(&self, t: &Track) -> bool;
     fn load_history(&self) -> Vec<Album>;
@@ -509,7 +509,7 @@ impl Env for Real<'_> {
             recs.lock().unwrap_or_else(|e| e.into_inner()).extend(got);
         });
     }
-    fn search_all(&self, q: &str) -> Vec<Item> {
+    fn search_all(&self, q: &str) -> Result<Vec<Item>, String> {
         self.yt.search_all(q)
     }
     fn resolve_result(&self, r: &Item) -> Result<(String, Vec<Track>, String), String> {
@@ -1232,10 +1232,18 @@ impl State {
                     Enter => {
                         let q = self.query.trim().to_string();
                         if !q.is_empty() {
-                            self.results = env.search_all(&q);
-                            if self.results.is_empty() {
-                                (self.flash, self.flash_ttl) =
-                                    ("search failed (offline?)".into(), 8);
+                            match env.search_all(&q) {
+                                Ok(r) if r.is_empty() => {
+                                    self.results = r;
+                                    (self.flash, self.flash_ttl) = ("no results".into(), 8);
+                                }
+                                Ok(r) => self.results = r,
+                                Err(e) => {
+                                    crate::log_err(&format!("search {q:?}: {e}"));
+                                    self.results.clear();
+                                    (self.flash, self.flash_ttl) =
+                                        (format!("search failed: {e}"), 8);
+                                }
                             }
                             (self.sel_s, self.focus) = (0, 1);
                         }
@@ -1258,6 +1266,8 @@ impl State {
                         {
                             Ok(r) => r,
                             Err(e) => {
+                                let r = &self.results[self.sel_s as usize];
+                                crate::log_err(&format!("load {:?}: {e}", r.title));
                                 (self.flash, self.flash_ttl) = (format!("couldn't load: {e}"), 8);
                                 return true;
                             }
@@ -1487,6 +1497,7 @@ impl State {
                             next,
                         ),
                         _ => {
+                            crate::log_err("queue: couldn't load the album's tracks");
                             self.flash = "queue failed — run `msm auth`?".into();
                             self.flash_ttl = 8;
                         }
@@ -1511,6 +1522,7 @@ impl State {
                 (self.flash, self.flash_ttl) = if !added {
                     (format!("♡ removed from favourites: {}", t.title), 6)
                 } else if t.url.starts_with("http") && !env.like_track(&t) {
+                    crate::log_err(&format!("YT like {:?} failed", t.title));
                     (
                         format!(
                             "♥ added to favourites: {} (YT like failed — `msm auth`?)",
@@ -1726,8 +1738,8 @@ mod tests {
             false
         }
         fn spawn_recs(&self, _: Arc<Mutex<Vec<Album>>>) {}
-        fn search_all(&self, _: &str) -> Vec<Item> {
-            vec![]
+        fn search_all(&self, _: &str) -> Result<Vec<Item>, String> {
+            Ok(vec![])
         }
         fn resolve_result(&self, _: &Item) -> Result<(String, Vec<Track>, String), String> {
             Err("fake".into())

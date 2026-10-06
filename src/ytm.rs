@@ -189,14 +189,20 @@ impl Yt {
     }
 
     /// songs + albums + playlists, first 5 of each, a failing category skipped.
-    pub fn search_all(&self, query: &str) -> Vec<Item> {
+    /// Err (the last failure) only when nothing came back.
+    pub fn search_all(&self, query: &str) -> Result<Vec<Item>, String> {
         let mut out = Vec::new();
+        let mut err = None;
         for filt in ["songs", "albums", "playlists"] {
-            if let Ok(r) = self.search(query, filt) {
-                out.extend(r.into_iter().take(5));
+            match self.search(query, filt) {
+                Ok(r) => out.extend(r.into_iter().take(5)),
+                Err(e) => err = Some(e),
             }
         }
-        out
+        match err {
+            Some(e) if out.is_empty() => Err(e),
+            _ => Ok(out),
+        }
     }
 
     /// Search result OR home item -> (title, tracks, thumb); infers type when
@@ -1492,7 +1498,7 @@ mod tests {
     #[ignore]
     fn live_anonymous_search() {
         let yt = Yt::anon();
-        let r = yt.search_all("radiohead nude");
+        let r = yt.search_all("radiohead nude").unwrap();
         assert!(
             r.iter()
                 .any(|i| i.result_type.as_deref() == Some("song") && i.video_id.is_some()),
@@ -1520,7 +1526,7 @@ mod tests {
     fn live_authed_read_only() {
         let yt = get_yt();
         assert!(yt.authed(), "no usable browser session");
-        let r = yt.search_all("radiohead in rainbows");
+        let r = yt.search_all("radiohead in rainbows").unwrap();
         assert!(
             r.iter().any(|i| i.result_type.as_deref() == Some("song")),
             "{r:?}"

@@ -214,6 +214,7 @@ Like `space`, `n` and `p`, `r` works on the browse screen, not inside search res
 | `~/.config/ymc/history.json` | last 5 albums played |
 | `~/.config/ymc/art/` | cached album art |
 | `$XDG_RUNTIME_DIR/msm/mpv.log` | verbose mpv log; check it when playback fails |
+| `$XDG_RUNTIME_DIR/msm/msm.log` | msm errors (search/load/queue/like) that only flash in the TUI |
 | `$XDG_RUNTIME_DIR/msm/mpv.sock` | mpv's IPC socket |
 
 Without `XDG_RUNTIME_DIR` the last two live in `$TMPDIR/msm-<uid>/` instead. The
