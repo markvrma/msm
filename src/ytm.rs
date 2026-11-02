@@ -69,8 +69,16 @@ enum YtClient {
     Anon(YtMusic<NoAuthToken>),
 }
 
+/// HTTP/1.1-only client. ytmapi-rs enables reqwest's `http2`, and YouTube
+/// resets the h2 stream ("unspecific protocol error") for the Firefox 88 UA
+/// ytmapi-rs sends, so every request fails. HTTP/1.1 is accepted.
+fn h1_client() -> Option<ytmapi_rs::Client> {
+    let inner = reqwest::Client::builder().http1_only().build().ok()?;
+    Some(ytmapi_rs::Client::new_from_reqwest_client(inner))
+}
+
 async fn try_authed(cookie: &str) -> Option<YtClient> {
-    let client = ytmapi_rs::Client::new().ok()?;
+    let client = h1_client()?;
     let token = BrowserToken::from_str(cookie, &client).await.ok()?;
     let yt = ytmapi_rs::YtMusicBuilder::new_with_client(client)
         .with_auth_token(token)
@@ -80,10 +88,13 @@ async fn try_authed(cookie: &str) -> Option<YtClient> {
 }
 
 async fn anon_client() -> Option<YtClient> {
-    YtMusic::new_unauthenticated()
-        .await
-        .ok()
-        .map(YtClient::Anon)
+    let client = h1_client()?;
+    let token = NoAuthToken::new(&client).await.ok()?;
+    let yt = ytmapi_rs::YtMusicBuilder::new_with_client(client)
+        .with_auth_token(token)
+        .build()
+        .ok()?;
+    Some(YtClient::Anon(yt))
 }
 
 /// Dispatch a `ytmapi-rs` simplified-query method to whichever client variant

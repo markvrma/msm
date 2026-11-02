@@ -22,7 +22,8 @@ sha1_smol = "1"
 libc = "0.2"
 rookie = "0.5"
 tokio = { version = "1", features = ["rt", "time"] }
-ytmapi-rs = { version = "0.3", default-features = false, features = ["rustls", "simplified-queries"] }
+reqwest = { version = "0.13", default-features = false }
+ytmapi-rs = { version = "0.3", default-features = false, features = ["rustls", "reqwest", "simplified-queries"] }
 
 # The profile that 'dist' will build with
 [profile.dist]
